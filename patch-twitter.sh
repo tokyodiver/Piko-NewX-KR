@@ -50,7 +50,7 @@ echo "Patcher JVM heap limit: ${PATCHER_MAX_HEAP_MB} MB"
 # Focused validation of the custom theme/settings and audience renderer on a supplied original.
 if [[ "${PIKO_PATCH_SMOKE:-false}" == true ]]; then
   java "-Xmx${PATCHER_MAX_HEAP_MB}m" -jar "$MORPHE_CLI_JAR" patch \
-    -p "$MPP" --keystore Morphe.keystore --exclusive \
+    -p "$MPP" --unsigned --exclusive \
     -e "NewX: Theme" -e "NewX: Hide audience selector" \
     --striplibs=arm64-v8a --force -o "$OUTPUT_APK" -- "$APK"
   exit 0
