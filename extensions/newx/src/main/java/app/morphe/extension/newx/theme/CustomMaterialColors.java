@@ -76,6 +76,17 @@ public final class CustomMaterialColors {
         if (name.endsWith("_on_surface") || name.endsWith("_on_surface_variant")) return original;
         if (name.endsWith("_on_primary")) return ColorSeedTransform.foregroundOn(chosen);
         if (name.endsWith("_primary") && name.startsWith("m3_")) return chosen;
+        // Composer buttons/tools use these accent ramp entries, not on-surface roles.
+        switch (name) {
+            case "material_dynamic_primary40":
+            case "material_dynamic_primary50":
+            case "material_dynamic_primary60":
+            case "material_dynamic_primary70":
+            case "material_dynamic_primary80":
+                return (original & 0xFF000000) | (chosen & 0x00FFFFFF);
+            default:
+                break;
+        }
         Context context = Utils.getContext();
         if (context == null) return original;
         Resources resources = context.getResources();
