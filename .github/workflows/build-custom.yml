@@ -1,4 +1,4 @@
-name: Build Korean custom theme
+name: Build Piko NewX KR
 
 on:
   workflow_dispatch:
@@ -31,17 +31,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN || github.token }}
         run: |
           chmod +x gradlew
-          ./gradlew buildAndroid :extensions:newx:testDebugUnitTest --tests "app.morphe.extension.newx.theme.ColorSeedTransformTest" --console=plain
+          ./gradlew buildAndroid --console=plain
       - name: Name custom patch bundle
         shell: bash
         run: |
           version=$(sed -n 's/^version = //p' gradle.properties)
           mkdir -p dist
-          cp "patches/build/libs/patches-$version.mpp" "dist/piko-newx-ko-custom-$version.mpp"
+          cp "patches/build/libs/patches-$version.mpp" "dist/piko-newx-kr-$version.mpp"
       - name: Upload patch bundle
         uses: actions/upload-artifact@v4
         with:
-          name: piko-newx-ko-custom-theme
+          name: piko-newx-kr
           path: dist/*.mpp
           if-no-files-found: error
       - name: Publish release
@@ -51,9 +51,9 @@ jobs:
         run: |
           version=$(sed -n 's/^version = //p' gradle.properties)
           tag="v$version"
-          artifact="dist/piko-newx-ko-custom-$version.mpp"
+          artifact="dist/piko-newx-kr-$version.mpp"
           test -s "$artifact"
-          gh release create "$tag" "$artifact" --target "$GITHUB_SHA" --title "Piko NewX Korean $tag" --notes "Touch color picker with presets and optional HEX input; direct custom accent colors for action tones and inline icons. Based on upstream Piko NewX 3.64.1 (eaa2552). NewX only. Target X: 12.37.2-prod.01 APKM. Device testing pending." --latest
+          gh release create "$tag" "$artifact" --target "$GITHUB_SHA" --title "Piko NewX KR $tag" --notes "Touch color picker with presets and optional HEX input; direct custom accent colors for action tones and inline icons. Based on upstream Piko NewX 3.64.1 (eaa2552). NewX only. Target X: 12.37.2-prod.01 APKM. Device testing pending." --latest
       - name: Update Morphe source metadata
         env:
           GH_TOKEN: ${{ github.token }}

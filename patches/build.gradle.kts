@@ -6,12 +6,12 @@ group = "crimera"
 
 patches {
     about {
-        name = "Piko NewX Korean"
+        name = "Piko NewX KR"
         description = "Morphe patches focused on Twitter/X"
-        source = "https://github.com/tokyodiver/piko_kr"
+        source = "https://github.com/tokyodiver/Piko-NewX-KR"
         author = "crimera"
         contact = "na"
-        website = "https://github.com/tokyodiver/piko_kr"
+        website = "https://github.com/tokyodiver/Piko-NewX-KR"
         license = "GNU General Public License v3.0"
     }
 }
