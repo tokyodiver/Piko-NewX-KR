@@ -1,0 +1,94 @@
+package app.morphe.extension.newx.theme;
+
+import android.content.Context;
+import android.content.res.Resources;
+import android.graphics.Color;
+
+import app.morphe.extension.crimera.settings.SettingsRegistry;
+import app.morphe.extension.shared.settings.Setting;
+import app.morphe.extension.shared.settings.StringSetting;
+import app.morphe.extension.shared.Utils;
+
+/** A palette override applied only to existing Material You resource reads. */
+public final class CustomMaterialColors {
+    public static final String LIGHT_ID = "newx.theme.custom_light";
+    public static final String DARK_ID = "newx.theme.custom_dark";
+    public static final String ENABLED_ID = "newx.theme.custom_enabled";
+
+    private CustomMaterialColors() { }
+
+    public static String saved(boolean dark) {
+        return SettingsRegistry.getStringOrDefault(dark ? DARK_ID : LIGHT_ID, "");
+    }
+
+    public static boolean isEnabled() {
+        return SettingsRegistry.getBooleanOrDefault(ENABLED_ID, false);
+    }
+
+    public static boolean isConfigured(boolean dark) {
+        return isEnabled() && normalizedHex(saved(dark)) != null;
+    }
+
+    public static String normalizedHex(String input) {
+        if (input == null) return null;
+        String hex = input.trim();
+        if (!hex.startsWith("#")) hex = "#" + hex;
+        if (!hex.matches("#[0-9a-fA-F]{6}")) return null;
+        return hex.toUpperCase(java.util.Locale.ROOT);
+    }
+
+    public static void save(boolean dark, String value) {
+        String hex = normalizedHex(value);
+        if (hex == null) throw new IllegalArgumentException("Expected a six-digit RGB color");
+        saveRaw(dark, hex);
+    }
+
+    public static void saveRaw(boolean dark, String value) {
+        if (!SettingsRegistry.isLoaded()) SettingsRegistry.load();
+        String id = dark ? DARK_ID : LIGHT_ID;
+        Setting<?> setting = SettingsRegistry.settingOrNull(id);
+        if (!(setting instanceof StringSetting text)) {
+            throw new IllegalStateException("Missing NewX custom color setting: " + id);
+        }
+        text.save(value);
+    }
+
+    /** A missing seed for a particular mode retains the system colors for that mode. */
+    public static int resolve(String name, int original) {
+        if (!isEnabled()) return original;
+        if (!name.startsWith("m3_sys_color_dynamic_")
+                && !name.startsWith("material_dynamic_primary")) return original;
+        boolean dark = name.startsWith("m3_sys_color_dynamic_dark_")
+                || (!name.startsWith("m3_sys_color_dynamic_light_")
+                        && isCurrentDark());
+        String hex = normalizedHex(saved(dark));
+        if (hex == null) return original;
+        int chosen = Color.parseColor(hex);
+        if (name.endsWith("_on_primary")) return ColorSeedTransform.foregroundOn(chosen);
+        if (name.endsWith("_primary") && name.startsWith("m3_")) return chosen;
+        if (name.startsWith("material_dynamic_primary")) {
+            try {
+                int tone = Integer.parseInt(name.substring("material_dynamic_primary".length()));
+                if (tone >= 0 && tone <= 100) {
+                    return (original & 0xFF000000)
+                            | (ColorSeedTransform.accentTone(chosen, tone) & 0x00FFFFFF);
+                }
+            } catch (NumberFormatException ignored) { }
+            return original;
+        }
+        Context context = Utils.getContext();
+        if (context == null) return original;
+        Resources resources = context.getResources();
+        String ref = dark ? "m3_sys_color_dynamic_dark_primary" :
+                "m3_sys_color_dynamic_light_primary";
+        int id = resources.getIdentifier(ref, "color", context.getPackageName());
+        if (id == 0) return original;
+        int source = resources.getColor(id, context.getTheme());
+        return ColorSeedTransform.transform(original, source, chosen);
+    }
+
+    private static boolean isCurrentDark() {
+        Context context = Utils.getContext();
+        return context != null && TwitterTheme.fromContext(context).isDark();
+    }
+}

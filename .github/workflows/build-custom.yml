@@ -1,0 +1,63 @@
+name: Build Korean custom theme
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install Android SDK components
+        run: sdkmanager "platforms;android-34" "platforms;android-36" "build-tools;34.0.0" "build-tools;36.0.0"
+      - name: Prepare NewX-only source
+        run: python3 .github/scripts/prepare_newx.py
+      - name: Build patch bundle
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN || github.token }}
+        run: |
+          chmod +x gradlew
+          ./gradlew buildAndroid :extensions:newx:testDebugUnitTest --tests "app.morphe.extension.newx.theme.ColorSeedTransformTest" --console=plain
+      - name: Name custom patch bundle
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = //p' gradle.properties)
+          mkdir -p dist
+          cp "patches/build/libs/patches-$version.mpp" "dist/piko-newx-ko-custom-$version.mpp"
+      - name: Upload patch bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: piko-newx-ko-custom-theme
+          path: dist/*.mpp
+          if-no-files-found: error
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = //p' gradle.properties)
+          tag="v$version"
+          artifact="dist/piko-newx-ko-custom-$version.mpp"
+          test -s "$artifact"
+          gh release create "$tag" "$artifact" --target "$GITHUB_SHA" --title "Piko NewX Korean $tag" --notes "Touch color picker with presets and optional HEX input; direct custom accent colors for action tones and inline icons. Based on upstream Piko NewX 3.64.1 (eaa2552). NewX only. Target X: 12.37.2-prod.01 APKM. Device testing pending." --latest
+      - name: Update Morphe source metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/contents/patches-bundle.json?ref=main" --jq .sha)
+          gh api "repos/$GITHUB_REPOSITORY/contents/patches-bundle.json" --method PUT -f branch=main -f message="Update Korean NewX release metadata [skip ci]" -f sha="$sha" -f content="$(base64 -w0 patches-bundle.json)" --silent
