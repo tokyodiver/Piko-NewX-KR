@@ -247,6 +247,8 @@ public final class Theme {
     }
 
     private static int primaryAccent(Context context, boolean dynamicColors) {
+        Integer custom = dynamicColors ? CustomMaterialColors.selectedColor(isDark(context)) : null;
+        if (custom != null) return custom;
         TwitterTheme.Accent accent = TwitterTheme.accent(context);
         if (usesDynamicAccent(dynamicColors, accent)) {
             return dynamicColor(context, "primary", accent.primaryColor(), dynamicColors);
@@ -255,6 +257,8 @@ public final class Theme {
     }
 
     private static int onPrimaryAccent(Context context, boolean dynamicColors) {
+        Integer custom = dynamicColors ? CustomMaterialColors.selectedColor(isDark(context)) : null;
+        if (custom != null) return CustomMaterialColors.onAccent(custom);
         TwitterTheme.Accent accent = TwitterTheme.accent(context);
         if (usesDynamicAccent(dynamicColors, accent)) {
             return dynamicColor(context, "on_primary", accent.onPrimaryColor(), dynamicColors);

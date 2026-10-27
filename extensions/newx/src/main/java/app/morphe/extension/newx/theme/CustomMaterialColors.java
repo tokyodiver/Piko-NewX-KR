@@ -29,6 +29,14 @@ public final class CustomMaterialColors {
         return isEnabled() && normalizedHex(saved(dark)) != null;
     }
 
+    public static Integer selectedColor(boolean dark) {
+        if (!isEnabled()) return null;
+        String hex = normalizedHex(saved(dark));
+        return hex == null ? null : Color.parseColor(hex);
+    }
+
+    public static int onAccent(int color) { return ColorSeedTransform.foregroundOn(color); }
+
     public static String normalizedHex(String input) {
         if (input == null) return null;
         String hex = input.trim();
@@ -64,18 +72,10 @@ public final class CustomMaterialColors {
         String hex = normalizedHex(saved(dark));
         if (hex == null) return original;
         int chosen = Color.parseColor(hex);
+        // Ordinary body text and unselected action icons keep their original neutral role.
+        if (name.endsWith("_on_surface") || name.endsWith("_on_surface_variant")) return original;
         if (name.endsWith("_on_primary")) return ColorSeedTransform.foregroundOn(chosen);
         if (name.endsWith("_primary") && name.startsWith("m3_")) return chosen;
-        if (name.startsWith("material_dynamic_primary")) {
-            try {
-                int tone = Integer.parseInt(name.substring("material_dynamic_primary".length()));
-                if (tone >= 0 && tone <= 100) {
-                    return (original & 0xFF000000)
-                            | (ColorSeedTransform.accentTone(chosen, tone) & 0x00FFFFFF);
-                }
-            } catch (NumberFormatException ignored) { }
-            return original;
-        }
         Context context = Utils.getContext();
         if (context == null) return original;
         Resources resources = context.getResources();

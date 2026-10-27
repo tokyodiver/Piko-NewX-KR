@@ -1,8 +1,8 @@
 {
-  "version": "v3.64.1-v2",
-  "download_url": "https://github.com/tokyodiver/Piko-NewX-KR/releases/download/v3.64.1-v2/piko-newx-kr-3.64.1-v2.mpp",
-  "created_at": "2026-10-27T13:03:21",
-  "description": "Piko NewX KR 3.64.1-v2: unified repository, bundle and file naming. Includes Korean settings, touch color picker and vivid custom accents. Device testing pending.",
+  "version": "v3.64.1-v3",
+  "download_url": "https://github.com/tokyodiver/Piko-NewX-KR/releases/download/v3.64.1-v3/piko-newx-kr-3.64.1-v3.mpp",
+  "created_at": "2026-10-27T13:41:51",
+  "description": "Piko NewX KR v3: restore neutral action colors, hide audience selector by default, prompt restart after color save, match custom settings selection colors. APK validation pending.",
   "app_version": "12.37.2-prod.01",
   "piko_commit": "eaa255276df4e5514cae8fc42eb014fca83ea786"
 }

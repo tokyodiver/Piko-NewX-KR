@@ -494,4 +494,8 @@
     <string name="piko_newx_custom_theme_presets">추천 색상</string>
     <string name="piko_newx_custom_theme_picker_help">사각형에서 색을 고르고, 아래 무지개에서 색조를 바꾸세요.</string>
     <string name="piko_newx_custom_theme_hex_toggle">HEX 색상 직접 입력</string>
+    <string name="piko_newx_composer_title">작성 화면</string>
+    <string name="piko_newx_composer_summary">게시물 작성 화면을 설정합니다</string>
+    <string name="piko_newx_hide_audience_title">모든 사람 버튼 숨기기</string>
+    <string name="piko_newx_hide_audience_summary">프로필 옆 게시 대상 선택 버튼을 숨깁니다. 선택된 게시 대상은 유지됩니다.</string>
 </resources>

@@ -22,17 +22,6 @@ final class ColorSeedTransform {
         return ((original >>> 24) << 24) | (rgb(hue, sat, role[2]) & 0x00FFFFFF);
     }
 
-    /** Keep action/accent tones exact; reserve the ramp ends for contrast roles. */
-    static int accentTone(int chosen, int tone) {
-        if (tone >= 40 && tone <= 80) return chosen;
-        int end = tone > 80 ? 255 : 0;
-        float amount = tone > 80 ? (tone - 80) / 20f : (40 - tone) / 40f;
-        int r = Math.round(((chosen >>> 16) & 255) * (1f - amount) + end * amount);
-        int g = Math.round(((chosen >>> 8) & 255) * (1f - amount) + end * amount);
-        int b = Math.round((chosen & 255) * (1f - amount) + end * amount);
-        return 0xFF000000 | (r << 16) | (g << 8) | b;
-    }
-
     static int foregroundOn(int bg) {
         return contrastRatio(bg, 0xFF000000) >= contrastRatio(bg, 0xFFFFFFFF)
                 ? 0xFF000000 : 0xFFFFFFFF;

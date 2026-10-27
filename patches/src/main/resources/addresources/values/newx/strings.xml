@@ -516,4 +516,8 @@
     <string name="piko_newx_custom_theme_presets">Quick colors</string>
     <string name="piko_newx_custom_theme_picker_help">Touch the square to choose a shade. Drag the rainbow to change hue.</string>
     <string name="piko_newx_custom_theme_hex_toggle">Enter a HEX color</string>
+    <string name="piko_newx_composer_title">Composer</string>
+    <string name="piko_newx_composer_summary">Customize the post composer</string>
+    <string name="piko_newx_hide_audience_title">Hide audience selector</string>
+    <string name="piko_newx_hide_audience_summary">Hide the audience button beside your avatar. The selected posting audience is unchanged.</string>
 </resources>

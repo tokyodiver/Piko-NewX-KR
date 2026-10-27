@@ -45,6 +45,7 @@ jobs:
           path: dist/*.mpp
           if-no-files-found: error
       - name: Publish release
+        if: "!contains(github.event.head_commit.message, '[build-only]')"
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -55,6 +56,7 @@ jobs:
           test -s "$artifact"
           gh release create "$tag" "$artifact" --target "$GITHUB_SHA" --title "Piko NewX KR $tag" --notes "Touch color picker with presets and optional HEX input; direct custom accent colors for action tones and inline icons. Based on upstream Piko NewX 3.64.1 (eaa2552). NewX only. Target X: 12.37.2-prod.01 APKM. Device testing pending." --latest
       - name: Update Morphe source metadata
+        if: "!contains(github.event.head_commit.message, '[build-only]')"
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash

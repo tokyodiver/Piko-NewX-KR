@@ -309,10 +309,6 @@ public final class DynamicColorPalette {
      * follows the host.
      */
     private static long inlineActionVariantTint(long originalColor) {
-        boolean dark = originalColor == SRGB_WHITE || isDarkTheme();
-        if (CustomMaterialColors.isConfigured(dark)) {
-            return dynamicColor(dark, LIGHT_PRIMARY, DARK_PRIMARY);
-        }
         if (originalColor == SRGB_WHITE) return color(DARK_ON_SURFACE_VARIANT);
         return dynamicColor(isDarkTheme(), LIGHT_ON_SURFACE_VARIANT, DARK_ON_SURFACE_VARIANT);
     }

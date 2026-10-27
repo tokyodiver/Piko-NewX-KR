@@ -28,7 +28,7 @@ if [[ ! -f "$MPP" ]]; then
 fi
 
 DEFAULT_APK="./apks/12.31.0-alpha.02.apk"
-OUTPUT_APK="$HOME/Downloads/piko-twitter-patched.apk"
+OUTPUT_APK="${PIKO_PATCH_OUTPUT:-$ROOT_DIR/build/piko-twitter-patched.apk}"
 APK="$DEFAULT_APK"
 FLAGS=()
 for arg in "$@"; do
@@ -45,7 +45,16 @@ for arg in "$@"; do
   esac
 done
 
+mkdir -p "$(dirname -- "$OUTPUT_APK")"
 echo "Patcher JVM heap limit: ${PATCHER_MAX_HEAP_MB} MB"
+# Focused validation of the custom theme/settings and audience renderer on a supplied original.
+if [[ "${PIKO_PATCH_SMOKE:-false}" == true ]]; then
+  java "-Xmx${PATCHER_MAX_HEAP_MB}m" -jar "$MORPHE_CLI_JAR" patch \
+    -p "$MPP" --keystore Morphe.keystore --exclusive \
+    -e "NewX: Theme" -e "NewX: Hide audience selector" \
+    --striplibs=arm64-v8a --force -o "$OUTPUT_APK" -- "$APK"
+  exit 0
+fi
 java "-Xmx${PATCHER_MAX_HEAP_MB}m" -jar "$MORPHE_CLI_JAR" patch \
   -p "$MPP" \
   --keystore Morphe.keystore \
@@ -91,6 +100,7 @@ java "-Xmx${PATCHER_MAX_HEAP_MB}m" -jar "$MORPHE_CLI_JAR" patch \
   -e "NewX: Open canonical URLs" \
   -e "NewX: Restore Twitter branding" \
   -e "NewX: Hide post reply bar" \
+  -e "NewX: Hide audience selector" \
   -e "NewX: Hide post author actions" \
   -e "NewX: Show poll results" \
   -e "NewX: Customize post menu items" \

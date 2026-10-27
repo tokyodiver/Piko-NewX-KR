@@ -18,7 +18,6 @@ import android.widget.ScrollView;
 import android.widget.FrameLayout;
 import android.view.Gravity;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 
@@ -28,6 +27,9 @@ import app.morphe.extension.newx.settings.NewXSettingsActivity;
 import app.morphe.extension.newx.ui.ListItem;
 import app.morphe.extension.newx.ui.Theme;
 import app.morphe.extension.shared.StringRef;
+import app.morphe.extension.shared.Utils;
+import app.morphe.extension.crimera.ui.ButtonView;
+import app.morphe.extension.crimera.ui.DialogView;
 
 /** Edits the two registry-backed custom Material You color seeds. */
 public final class CustomThemeFragment extends CustomScreenFragment {
@@ -108,7 +110,7 @@ public final class CustomThemeFragment extends CustomScreenFragment {
                     CustomMaterialColors.saveRaw(false, "");
                     CustomMaterialColors.saveRaw(true, "");
                     refresh();
-                    toast("piko_newx_custom_theme_reset_done");
+                    promptForRestart(activity);
                 })
                 .show();
     }
@@ -235,8 +237,8 @@ public final class CustomThemeFragment extends CustomScreenFragment {
                     }
                     CustomMaterialColors.save(dark, selected);
                     refresh();
-                    toast("piko_newx_custom_theme_saved");
                     dialog.dismiss();
+                    promptForRestart(activity);
                 }));
         dialog.show();
     }
@@ -258,8 +260,20 @@ public final class CustomThemeFragment extends CustomScreenFragment {
         return context;
     }
 
-    private void toast(String id) {
-        Context context = getActivity();
-        if (context != null) Toast.makeText(context, str(id), Toast.LENGTH_LONG).show();
+    private static void promptForRestart(Activity activity) {
+        DialogView dialog = new DialogView(activity)
+                .setTitle(str("piko_newx_restart_title"))
+                .setSubtitle(str("piko_newx_restart_summary"));
+        dialog.getDialog().setCanceledOnTouchOutside(true);
+        ButtonView cancel = new ButtonView(activity, ButtonView.ButtonStyle.TEXT,
+                str("piko_newx_settings_cancel"));
+        cancel.setOnClickListener(ignored -> dialog.dismiss());
+        ButtonView restart = new ButtonView(activity, ButtonView.ButtonStyle.FILLED,
+                str("piko_newx_restart_now"));
+        restart.setOnClickListener(ignored -> {
+            dialog.dismiss();
+            Utils.restartApp(activity);
+        });
+        dialog.addButton(cancel).addButton(restart).show();
     }
 }
