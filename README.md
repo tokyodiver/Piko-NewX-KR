@@ -1,6 +1,6 @@
 # Piko NewX 한국어 + 커스텀 테마
 
-[**➕ Morphe에 한국어 패치 추가**](https://morphe.software/add-source?github=tokyodiver/piko_kr)
+[**➕ Morphe에 Piko NewX KR 추가**](https://morphe.software/add-source?github=tokyodiver/piko_kr&name=Piko%20NewX%20KR)
 
 [패치 파일 다운로드](https://github.com/tokyodiver/piko_kr/releases/latest)
 
