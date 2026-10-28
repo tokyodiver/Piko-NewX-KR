@@ -3,6 +3,7 @@ package app.morphe.extension.newx.theme;
 import android.content.Context;
 import android.content.res.Resources;
 import android.graphics.Color;
+import android.os.Build;
 
 import app.morphe.extension.crimera.settings.SettingsRegistry;
 import app.morphe.extension.shared.settings.Setting;
@@ -27,6 +28,13 @@ public final class CustomMaterialColors {
 
     public static boolean isConfigured(boolean dark) {
         return isEnabled() && normalizedHex(saved(dark)) != null;
+    }
+
+    /** Custom accents take priority without replacing the host's neutral palette. */
+    public static boolean useNativePalette() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false;
+        Context context = Utils.getContext();
+        return context != null && isConfigured(TwitterTheme.fromContext(context).isDark());
     }
 
     public static Integer selectedColor(boolean dark) {

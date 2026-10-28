@@ -58,7 +58,19 @@ jobs:
           tag="v$version"
           artifact="dist/piko-newx-kr-$version.mpp"
           test -s "$artifact"
-          gh release create "$tag" "$artifact" --target "$GITHUB_SHA" --title "Piko NewX KR $tag" --notes "Default theme now supports custom light/dark accents while preserving native text, inactive action icons/counts, tabs, backgrounds, and dividers. Select Default, enable custom accent colors, and restart X. Material You and High Contrast retain their full-palette behavior. Based on Piko NewX 3.64.1 (eaa2552). Target X: 12.37.2-prod.01 APKM. Device UI testing pending." --latest
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          metadata = json.loads(Path("patches-bundle.json").read_text())
+          upstream = json.loads(Path(".github/upstream.json").read_text())
+          Path("dist/release-notes.md").write_text(
+              metadata["description"] + "\n\n"
+              + f"Upstream Piko NewX: {upstream['release']} ({upstream['commit']})\n"
+              + f"Target X: {metadata['app_version']} APKM\n"
+              + "Build and automated tests passed; device UI testing pending.\n"
+          )
+          PY
+          gh release create "$tag" "$artifact" --target "$GITHUB_SHA" --title "Piko NewX KR $tag" --notes-file dist/release-notes.md --latest
       - name: Update Morphe source metadata
         if: "github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[build-only]')"
         env:

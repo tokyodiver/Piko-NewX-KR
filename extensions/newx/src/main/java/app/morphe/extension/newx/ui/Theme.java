@@ -69,6 +69,7 @@ public final class Theme {
     }
 
     static String themeStyle() {
+        if (CustomMaterialColors.useNativePalette()) return THEME_DEFAULT;
         return resolveThemeStyle(
                 SettingsRegistry.isRegistered(THEME_SETTING),
                 SettingsRegistry.getStringOrDefault(THEME_SETTING, THEME_CONTRAST)

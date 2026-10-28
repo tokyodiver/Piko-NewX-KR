@@ -141,9 +141,9 @@ public final class DynamicColorPalette {
         return THEME_DIM.equals(themeStyle());
     }
 
-    /** Whether the theme chooser selected the unmodified original NewX colors. */
+    /** Native UI colors are selected explicitly or take priority for custom accents. */
     public static boolean useDefaultTheme() {
-        return THEME_DEFAULT.equals(themeStyle());
+        return THEME_DEFAULT.equals(themeStyle()) || CustomMaterialColors.useNativePalette();
     }
 
     static String themeStyle() {
