@@ -1,0 +1,9 @@
+# Custom accents must retain native thread connectors
+
+- Report: thread connector is dark gray with a theme applied, versus pale gray in the original UI. Installed KR version and selected theme could not be established from the screenshots.
+- Target for patch verification: `com.twitter.android`, `12.37.2-prod.01`, original APKM; MPP `patches-3.65.0-v2.mpp` built from this source revision. No linter or fingerprint changes.
+- Confirmed source path: `DynamicColorPalette.isEnabled()` previously enabled the full palette for Material You/high contrast even with a valid custom accent. This also enabled XDS foreground, inline-action and tab overrides. The v5 native-accent path was only selected by the explicit Default theme.
+- Fix: a valid enabled custom accent for the current light/dark mode now selects the native palette before the stored theme choice. The existing three native constructor argument hooks still change only PRIMARY, ON_PRIMARY and LINK; neutral palette roles and XDS foreground values remain host-owned. The settings UI follows the same priority.
+- Controls: disabled, missing or invalid custom colors retain the selected theme; API below 31 does not enable custom palette priority. Separate light/dark saved colors and original alpha remain intact.
+- Local validation: 140 checks against actual Java classes with Android API stubs cover all four theme choices, both brightness modes, accent/foreground values, alpha and neutral-role preservation. This is not a device UI test.
+- Release validation: build using `:patches:build buildAndroid :patches:lintNewxResolvers`, then run `PIKO_PATCH_SMOKE=true MORPHE_CLI_JAR=morphe-cli.jar ./patch-twitter.sh ../apk-analysis/original-12.37.2.apkm` and inspect final native constructor hooks. No device control or old-APK runtime validation is included.
