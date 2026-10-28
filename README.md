@@ -1,5 +1,7 @@
 # Piko NewX KR
 
+[![원본 자동 동기화](https://github.com/tokyodiver/Piko-NewX-KR/actions/workflows/sync-upstream.yml/badge.svg)](https://github.com/tokyodiver/Piko-NewX-KR/actions/workflows/sync-upstream.yml)
+
 [**➕ Morphe에 Piko NewX KR 추가**](https://morphe.software/add-source?github=tokyodiver/Piko-NewX-KR&name=Piko%20NewX%20KR)
 
 [패치 파일 다운로드](https://github.com/tokyodiver/Piko-NewX-KR/releases/latest)
@@ -35,5 +37,13 @@
 ## 배포
 
 수정 소스, 빌드 및 Morphe 배포 정보는 main 브랜치를 사용합니다. Actions의 Build Korean custom theme 작업은 NewX 전용 빌드 후 `gradle.properties`의 버전으로 GitHub Release와 MPP를 게시합니다. 새 버전을 배포할 때 `gradle.properties`와 `patches-bundle.json`의 버전·다운로드 URL·시각을 함께 갱신합니다. 기존 릴리스는 덮어쓰지 않습니다.
+
+## 원본 자동 업데이트 확인
+
+- 매일 오전 9시(한국 시간, GitHub 사정에 따라 지연 가능)에 원본 Piko NewX의 정식 릴리스를 확인합니다. PC를 켜둘 필요는 없습니다.
+- 새 릴리스가 있으면 배포본이 가리키는 Piko `x-lite` 커밋까지의 변경을 3-way 병합합니다. 기존 한국어·사용자 강조색 수정은 유지하며, 충돌하면 자동 선택하지 않고 중단합니다. 새 원본 문구는 영어로 표시될 수 있습니다.
+- 빌드·자동 테스트를 통과한 소스만 main에 반영하고 새 KR 릴리스로 배포합니다. 충돌·빌드 실패 시 기존 main과 릴리스를 유지합니다. APK 실기기 동작 검증은 자동으로 수행하지 않습니다.
+- **확인:** 위 상태 배지 또는 [Actions → Sync upstream Piko NewX](https://github.com/tokyodiver/Piko-NewX-KR/actions/workflows/sync-upstream.yml) → 최신 실행 → Summary. 초록색 실행도 업데이트가 없었을 수 있으므로 요약의 결과와 원본/KR 버전을 확인하세요. 빨간색 실행은 실패한 단계에서 로그를 볼 수 있습니다.
+- **수동 실행:** 같은 화면의 Run workflow. `check_only`를 켜면 업데이트 유무만 확인하며 소스를 바꾸거나 배포하지 않습니다. 배포된 파일은 [Releases](https://github.com/tokyodiver/Piko-NewX-KR/releases/latest)에서 확인합니다.
 
 원본 저작자와 기여자의 권리는 LICENSE(GPLv3), NOTICE를 따릅니다. 한국어·테마 수정 설명은 CUSTOM_KO_THEME_README.md를 참고하세요.

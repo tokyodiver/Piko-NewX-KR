@@ -1,0 +1,93 @@
+name: Sync upstream Piko NewX
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # 09:00 Asia/Seoul; GitHub may delay scheduled runs.
+  workflow_dispatch:
+    inputs:
+      check_only:
+        description: '업데이트 확인만 실행 (배포하지 않음)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: read
+
+concurrency:
+  group: piko-newx-kr-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - name: Test sync safeguards
+        run: python3 -m unittest discover -s .github/scripts -p 'test_sync_upstream.py'
+      - name: Check and merge upstream release
+        id: plan
+        env:
+          CHECK_ONLY: ${{ inputs.check_only }}
+        run: python3 .github/scripts/sync_upstream.py
+      - name: Commit candidate before build filtering
+        if: steps.plan.outputs.mode == 'update'
+        env:
+          UPSTREAM_TAG: ${{ steps.plan.outputs.upstream_tag }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/upstream.json gradle.properties patches-bundle.json README.md
+          git commit -m "Sync Piko NewX $UPSTREAM_TAG into KR"
+      - uses: actions/setup-java@v6
+        if: steps.plan.outputs.mode == 'update' || steps.plan.outputs.mode == 'publish'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        if: steps.plan.outputs.mode == 'update' || steps.plan.outputs.mode == 'publish'
+        with:
+          packages: platform-tools
+      - name: Build and test candidate
+        if: steps.plan.outputs.mode == 'update' || steps.plan.outputs.mode == 'publish'
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN || github.token }}
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          sdkmanager "platforms;android-34" "platforms;android-36" "build-tools;34.0.0" "build-tools;36.0.0"
+          python3 .github/scripts/prepare_newx.py
+          chmod +x gradlew
+          ./gradlew :patches:build buildAndroid :patches:lintNewxResolvers --no-daemon --console=plain
+          mkdir -p dist
+          cp "patches/build/libs/patches-$VERSION.mpp" "dist/piko-newx-kr-$VERSION.mpp"
+      - uses: actions/upload-artifact@v4
+        if: steps.plan.outputs.mode == 'update' || steps.plan.outputs.mode == 'publish'
+        with:
+          name: piko-newx-kr-${{ steps.plan.outputs.version }}
+          path: dist/*.mpp
+          if-no-files-found: error
+      - name: Publish validated source and release
+        if: steps.plan.outputs.mode == 'update' || steps.plan.outputs.mode == 'publish'
+        env:
+          MODE: ${{ steps.plan.outputs.mode }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          UPSTREAM_TAG: ${{ steps.plan.outputs.upstream_tag }}
+          UPSTREAM_SHA: ${{ steps.plan.outputs.upstream_sha }}
+        run: |
+          if [ "$MODE" = update ]; then
+            git push origin HEAD:main
+          fi
+          printf '%s\n' "원본 Piko NewX $UPSTREAM_TAG 자동 동기화 ($UPSTREAM_SHA)." '' '기존 한국어·사용자 강조색 수정을 유지하고 빌드·자동 테스트를 통과했습니다. 새 원본 문구는 영어로 표시될 수 있으며, 실기기 UI는 미검증입니다.' > release-notes.md
+          gh release create "v$VERSION" "dist/piko-newx-kr-$VERSION.mpp" --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" --title "Piko NewX KR v$VERSION" --notes-file release-notes.md --latest
+          printf '\n## 배포 완료\n\n[KR v%s](https://github.com/%s/releases/tag/v%s)\n' "$VERSION" "$GITHUB_REPOSITORY" "$VERSION" >> "$GITHUB_STEP_SUMMARY"
+      - name: Explain stopped sync
+        if: failure()
+        run: |
+          printf '\n## 자동 업데이트 중단\n\n충돌·빌드·테스트·게시 중 실패했습니다. 실패한 단계의 로그를 확인하세요. 기존 릴리스 파일은 덮어쓰지 않습니다.\n' >> "$GITHUB_STEP_SUMMARY"
