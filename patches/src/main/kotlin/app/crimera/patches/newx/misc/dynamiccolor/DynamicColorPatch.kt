@@ -2949,7 +2949,7 @@ private fun MutableMethod.injectDynamicPalette(
         injectDarkBackgrounds(nativeConstructor)
     }
 
-    val nativeConstructorIndex = instructions.indexOf(nativeConstructor.instruction)
+    val nativeConstructorIndex = instructions.indexOfFirst { it === nativeConstructor.instruction }
     if (nativeConstructorIndex < 0) {
         throw PatchException("NewX native palette constructor disappeared before accent injection: $this")
     }
