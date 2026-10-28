@@ -31,7 +31,7 @@ import app.morphe.extension.shared.Utils;
 import app.morphe.extension.crimera.ui.ButtonView;
 import app.morphe.extension.crimera.ui.DialogView;
 
-/** Edits the two registry-backed custom Material You color seeds. */
+/** Edits saved light/dark colors and the five most recently confirmed colors. */
 public final class CustomThemeFragment extends CustomScreenFragment {
     private ListItem lightRow;
     private ListItem darkRow;
@@ -110,7 +110,7 @@ public final class CustomThemeFragment extends CustomScreenFragment {
                     CustomMaterialColors.saveRaw(false, "");
                     CustomMaterialColors.saveRaw(true, "");
                     refresh();
-                    promptForRestart(activity);
+                    if (CustomMaterialColors.isEnabled()) promptForRestart(activity);
                 })
                 .show();
     }
@@ -138,11 +138,6 @@ public final class CustomThemeFragment extends CustomScreenFragment {
         swatch.setTextColor(ColorSeedTransform.foregroundOn(initial));
         form.addView(swatch, new LinearLayout.LayoutParams(-1, Theme.dpToPx(context, 56f)));
 
-        TextView presetsTitle = SettingsUi.summaryText(context);
-        presetsTitle.setText(str("piko_newx_custom_theme_presets"));
-        presetsTitle.setPadding(0, pad / 2, 0, 0);
-        form.addView(presetsTitle);
-
         EditText hex = new EditText(context);
         hex.setSingleLine(true);
         hex.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
@@ -169,12 +164,15 @@ public final class CustomThemeFragment extends CustomScreenFragment {
             hex.setText(String.format(java.util.Locale.ROOT, "#%06X", rgb & 0xFFFFFF));
             updating[0] = false;
         });
-        int[] presets = {0xFF1D9BF0, 0xFF536DFE, 0xFF8B5CF6, 0xFFE879F9, 0xFFF43F5E,
-                0xFFFF7A00, 0xFFF5C542, 0xFF22C55E, 0xFF14B8A6, 0xFF94A3B8};
-        for (int row = 0; row < 2; row++) {
+        String[] recent = CustomMaterialColors.recentColors();
+        if (recent.length > 0) {
+            TextView recentTitle = SettingsUi.summaryText(context);
+            recentTitle.setText(str("piko_newx_custom_theme_presets"));
+            recentTitle.setPadding(0, pad / 2, 0, 0);
+            form.addView(recentTitle);
             LinearLayout palette = new LinearLayout(context);
-            for (int column = 0; column < 5; column++) {
-                int rgb = presets[row * 5 + column];
+            for (String color : recent) {
+                int rgb = Color.parseColor(color);
                 FrameLayout target = new FrameLayout(context);
                 target.setContentDescription(String.format(java.util.Locale.ROOT, "#%06X", rgb & 0xFFFFFF));
                 target.setFocusable(true);
@@ -189,11 +187,11 @@ public final class CustomThemeFragment extends CustomScreenFragment {
                 target.addView(dot, new FrameLayout.LayoutParams(size, size, Gravity.CENTER));
                 palette.addView(target, new LinearLayout.LayoutParams(0, Theme.dpToPx(context, 48f), 1f));
             }
+            for (int empty = recent.length; empty < 5; empty++) {
+                palette.addView(new View(context), new LinearLayout.LayoutParams(0, Theme.dpToPx(context, 48f), 1f));
+            }
             form.addView(palette);
         }
-        TextView help = SettingsUi.summaryText(context);
-        help.setText(str("piko_newx_custom_theme_picker_help"));
-        form.addView(help);
         form.addView(picker, new LinearLayout.LayoutParams(-1, Theme.dpToPx(context, 260f)));
 
         TextView advanced = SettingsUi.summaryText(context);
@@ -238,7 +236,7 @@ public final class CustomThemeFragment extends CustomScreenFragment {
                     CustomMaterialColors.save(dark, selected);
                     refresh();
                     dialog.dismiss();
-                    promptForRestart(activity);
+                    if (CustomMaterialColors.isEnabled()) promptForRestart(activity);
                 }));
         dialog.show();
     }

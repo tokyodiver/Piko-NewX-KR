@@ -69,7 +69,6 @@ public final class Theme {
     }
 
     static String themeStyle() {
-        if (CustomMaterialColors.useNativePalette()) return THEME_DEFAULT;
         return resolveThemeStyle(
                 SettingsRegistry.isRegistered(THEME_SETTING),
                 SettingsRegistry.getStringOrDefault(THEME_SETTING, THEME_CONTRAST)
@@ -83,7 +82,7 @@ public final class Theme {
      */
     static String resolveThemeStyle(boolean settingRegistered, String settingValue) {
         if (!settingRegistered) return THEME_CONTRAST;
-        if (THEME_DEFAULT.equals(settingValue)) return THEME_DEFAULT;
+        if (THEME_DEFAULT.equals(settingValue) || "custom".equals(settingValue)) return THEME_DEFAULT;
         if (THEME_MATERIAL.equals(settingValue)) return THEME_MATERIAL;
         if (THEME_DIM.equals(settingValue)) return THEME_DIM;
         return THEME_CONTRAST;

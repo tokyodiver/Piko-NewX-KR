@@ -24,6 +24,7 @@ public final class ThemeStyleResolutionTest {
         assertEquals("contrast", Theme.resolveThemeStyle(true, "contrast"));
         assertEquals("material", Theme.resolveThemeStyle(true, "material"));
         assertEquals("dim", Theme.resolveThemeStyle(true, "dim"));
+        assertEquals("default", Theme.resolveThemeStyle(true, "custom"));
     }
 
     @Test

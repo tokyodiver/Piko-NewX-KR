@@ -16,6 +16,7 @@ public final class DynamicColorPaletteTest {
         assertEquals("material", DynamicColorPalette.normalizeThemeStyle("material"));
         assertEquals("contrast", DynamicColorPalette.normalizeThemeStyle("contrast"));
         assertEquals("dim", DynamicColorPalette.normalizeThemeStyle("dim"));
+        assertEquals("custom", DynamicColorPalette.normalizeThemeStyle("custom"));
     }
 
     @Test

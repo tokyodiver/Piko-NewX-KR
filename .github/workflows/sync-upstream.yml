@@ -64,7 +64,7 @@ jobs:
           sdkmanager "platforms;android-34" "platforms;android-36" "build-tools;34.0.0" "build-tools;36.0.0"
           python3 .github/scripts/prepare_newx.py
           chmod +x gradlew
-          ./gradlew :patches:build buildAndroid :patches:lintNewxResolvers --no-daemon --console=plain
+          ./gradlew :patches:build buildAndroid :patches:lintNewxResolvers :extensions:newx:testDebugUnitTest --tests 'app.morphe.extension.newx.theme.CustomMaterialColorsTest' --tests 'app.morphe.extension.newx.theme.DynamicColorPaletteTest' --tests 'app.morphe.extension.newx.ui.ThemeStyleResolutionTest' --no-daemon --console=plain
           mkdir -p dist
           cp "patches/build/libs/patches-$VERSION.mpp" "dist/piko-newx-kr-$VERSION.mpp"
       - uses: actions/upload-artifact@v4

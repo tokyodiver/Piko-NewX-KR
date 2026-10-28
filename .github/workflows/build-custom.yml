@@ -35,7 +35,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN || github.token }}
         run: |
           chmod +x gradlew
-          ./gradlew :patches:build buildAndroid :patches:lintNewxResolvers --no-daemon --console=plain
+          ./gradlew :patches:build buildAndroid :patches:lintNewxResolvers :extensions:newx:testDebugUnitTest --tests 'app.morphe.extension.newx.theme.CustomMaterialColorsTest' --tests 'app.morphe.extension.newx.theme.DynamicColorPaletteTest' --tests 'app.morphe.extension.newx.ui.ThemeStyleResolutionTest' --no-daemon --console=plain
       - name: Name custom patch bundle
         shell: bash
         run: |

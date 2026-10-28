@@ -145,6 +145,7 @@ private const val THEME_DEFAULT = "default"
 private const val THEME_MATERIAL = "material"
 private const val THEME_CONTRAST = "contrast"
 private const val THEME_DIM = "dim"
+private const val THEME_CUSTOM = "custom"
 
 private enum class PaletteKind(
     val helperMethod: String,
@@ -217,14 +218,8 @@ val dynamicColorPatch =
                                     choice(THEME_MATERIAL, "piko_newx_theme_material"),
                                     choice(THEME_CONTRAST, "piko_newx_theme_contrast"),
                                     choice(THEME_DIM, "piko_newx_theme_dim"),
+                                    choice(THEME_CUSTOM, "piko_newx_theme_custom"),
                                 ),
-                        )
-                        toggle(
-                            id = "newx.theme.custom_enabled",
-                            strings = settingStrings("piko_newx_custom_theme_enabled"),
-                            order = 250,
-                            defaultValue = false,
-                            rebootApp = true,
                         )
                         customScreen(
                             id = "newx.theme.custom_colors",
@@ -246,6 +241,13 @@ val dynamicColorPatch =
                             id = "newx.theme.custom_dark",
                             strings = settingStrings("piko_newx_custom_theme_dark"),
                             order = 360,
+                            defaultValue = "",
+                            visible = false,
+                        )
+                        input(
+                            id = "newx.theme.custom_recent",
+                            strings = settingStrings("piko_newx_custom_theme_recent"),
+                            order = 370,
                             defaultValue = "",
                             visible = false,
                         )

@@ -3,7 +3,7 @@ package app.morphe.extension.newx.theme;
 import android.content.Context;
 import android.content.res.Resources;
 import android.graphics.Color;
-import android.os.Build;
+import java.util.ArrayList;
 
 import app.morphe.extension.crimera.settings.SettingsRegistry;
 import app.morphe.extension.shared.settings.Setting;
@@ -14,7 +14,7 @@ import app.morphe.extension.shared.Utils;
 public final class CustomMaterialColors {
     public static final String LIGHT_ID = "newx.theme.custom_light";
     public static final String DARK_ID = "newx.theme.custom_dark";
-    public static final String ENABLED_ID = "newx.theme.custom_enabled";
+    public static final String RECENT_ID = "newx.theme.custom_recent";
 
     private CustomMaterialColors() { }
 
@@ -23,18 +23,11 @@ public final class CustomMaterialColors {
     }
 
     public static boolean isEnabled() {
-        return SettingsRegistry.getBooleanOrDefault(ENABLED_ID, false);
+        return "custom".equals(SettingsRegistry.getStringOrDefault("newx.theme.dark_style", ""));
     }
 
     public static boolean isConfigured(boolean dark) {
         return isEnabled() && normalizedHex(saved(dark)) != null;
-    }
-
-    /** Custom accents take priority without replacing the host's neutral palette. */
-    public static boolean useNativePalette() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false;
-        Context context = Utils.getContext();
-        return context != null && isConfigured(TwitterTheme.fromContext(context).isDark());
     }
 
     public static Integer selectedColor(boolean dark) {
@@ -57,11 +50,44 @@ public final class CustomMaterialColors {
         String hex = normalizedHex(value);
         if (hex == null) throw new IllegalArgumentException("Expected a six-digit RGB color");
         saveRaw(dark, hex);
+        saveSetting(RECENT_ID, rememberColor(
+                SettingsRegistry.getStringOrDefault(RECENT_ID, ""), hex));
     }
 
     public static void saveRaw(boolean dark, String value) {
+        saveSetting(dark ? DARK_ID : LIGHT_ID, value);
+    }
+
+    public static String[] recentColors() {
+        return recentColors(SettingsRegistry.getStringOrDefault(RECENT_ID, ""));
+    }
+
+    static String[] recentColors(String saved) {
+        ArrayList<String> colors = new ArrayList<>(5);
+        for (String entry : saved.split(",")) {
+            String hex = normalizedHex(entry);
+            if (hex == null || colors.contains(hex)) continue;
+            colors.add(hex);
+            if (colors.size() == 5) break;
+        }
+        return colors.toArray(new String[0]);
+    }
+
+    static String rememberColor(String saved, String selected) {
+        String hex = normalizedHex(selected);
+        if (hex == null) throw new IllegalArgumentException("Expected a six-digit RGB color");
+        StringBuilder result = new StringBuilder(hex);
+        int count = 1;
+        for (String previous : recentColors(saved)) {
+            if (hex.equals(previous)) continue;
+            result.append(',').append(previous);
+            if (++count == 5) break;
+        }
+        return result.toString();
+    }
+
+    private static void saveSetting(String id, String value) {
         if (!SettingsRegistry.isLoaded()) SettingsRegistry.load();
-        String id = dark ? DARK_ID : LIGHT_ID;
         Setting<?> setting = SettingsRegistry.settingOrNull(id);
         if (!(setting instanceof StringSetting text)) {
             throw new IllegalStateException("Missing NewX custom color setting: " + id);

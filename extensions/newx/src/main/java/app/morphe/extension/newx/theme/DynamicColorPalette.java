@@ -37,6 +37,7 @@ public final class DynamicColorPalette {
     private static final String THEME_MATERIAL = "material";
     private static final String THEME_CONTRAST = "contrast";
     private static final String THEME_DIM = "dim";
+    private static final String THEME_CUSTOM = "custom";
     /** Framework equivalents of the 13-step ramp, indexed by NewX tone (primary100 .. primary0). */
     private static final String[] ACCENT_FRAMEWORK_NAMES = {
             "system_accent1_0", "system_accent1_10", "system_accent1_50", "system_accent1_100",
@@ -141,9 +142,9 @@ public final class DynamicColorPalette {
         return THEME_DIM.equals(themeStyle());
     }
 
-    /** Native UI colors are selected explicitly or take priority for custom accents. */
+    /** Default and Custom use native UI colors; only Custom replaces saved colors. */
     public static boolean useDefaultTheme() {
-        return THEME_DEFAULT.equals(themeStyle()) || CustomMaterialColors.useNativePalette();
+        return THEME_DEFAULT.equals(themeStyle()) || CustomMaterialColors.isEnabled();
     }
 
     static String themeStyle() {
@@ -160,6 +161,7 @@ public final class DynamicColorPalette {
         if (THEME_DEFAULT.equals(style)) return THEME_DEFAULT;
         if (THEME_MATERIAL.equals(style)) return THEME_MATERIAL;
         if (THEME_DIM.equals(style)) return THEME_DIM;
+        if (THEME_CUSTOM.equals(style)) return THEME_CUSTOM;
         return THEME_CONTRAST;
     }
 

@@ -144,15 +144,16 @@
     <string name="piko_newx_hide_premium_upsell_title">Hide premium upsell</string>
     <string name="piko_newx_hide_premium_upsell_summary">Hides the premium upgrade chip from the home top bar</string>
     <string name="piko_newx_group_theme_title">Theme</string>
-    <string name="piko_newx_group_theme_summary">Choose the Default, Material You, Material You (High Contrast), or Dim theme</string>
+    <string name="piko_newx_group_theme_summary">Choose a theme and configure custom colors</string>
     <string name="piko_newx_theme_title">Theme</string>
-    <string name="piko_newx_theme_summary">Default keeps the original NewX colors; Material You follows your wallpaper colors; Material You (High Contrast) uses white and black backgrounds; Dim restores the classic static look.</string>
+    <string name="piko_newx_theme_summary">Choose Default, Material You, High Contrast, Dim, or Custom.</string>
     <string name="piko_newx_theme_default">Default</string>
     <string name="piko_newx_theme_material">Material You</string>
     <string name="piko_newx_theme_contrast">Material You (High Contrast)</string>
     <string name="piko_newx_theme_dim">Dim</string>
+    <string name="piko_newx_theme_custom">Custom</string>
     <string name="piko_newx_dynamic_color_like_title">Theme liked-post icon</string>
-    <string name="piko_newx_dynamic_color_like_summary">Uses the dynamic accent for liked posts. Warning: This disables the heart Lottie animation.</string>
+    <string name="piko_newx_dynamic_color_like_summary">Apply theme colors to liked post icons. Disables the heart animation.</string>
     <string name="piko_newx_disable_blur_title">Disable Compose blur</string>
     <string name="piko_newx_disable_blur_summary">Removes blur from NewX Compose UI while keeping configured background tint and scrim effects</string>
 
@@ -491,16 +492,14 @@
     <string name="piko_newx_settings_search_clear">Clear search</string>
     <string name="piko_newx_settings_search_no_results">No results for \"%s\"</string>
 
-    <string name="piko_newx_custom_theme_enabled_title">Use custom accent colors</string>
-    <string name="piko_newx_custom_theme_enabled_summary">A saved custom accent takes priority over the selected theme and keeps original thread lines, text, inactive icons, and backgrounds. Restart X to apply.</string>
-    <string name="piko_newx_custom_theme_colors_title">Choose custom accent colors</string>
-    <string name="piko_newx_custom_theme_colors_summary">Set separate light and dark colors using a picker or HEX code</string>
+    <string name="piko_newx_custom_theme_colors_title">Choose custom colors</string>
+    <string name="piko_newx_custom_theme_colors_summary">Set separate light and dark colors</string>
     <string name="piko_newx_custom_theme_light_title">Custom light color</string>
     <string name="piko_newx_custom_theme_light_summary">Saved six-digit HEX color for light mode</string>
     <string name="piko_newx_custom_theme_dark_title">Custom dark color</string>
     <string name="piko_newx_custom_theme_dark_summary">Saved six-digit HEX color for dark mode</string>
-    <string name="piko_newx_custom_theme_explain">Save a color for each light and dark mode, then enable custom accents and restart X. For a mode with a saved color, custom accents take priority over the theme choice while original thread lines, text, inactive actions, and backgrounds stay unchanged. Turning custom accents off restores the selected theme.</string>
-    <string name="piko_newx_custom_theme_system">System Material You color</string>
+    <string name="piko_newx_custom_theme_explain">Select Custom in the theme chooser to apply your saved light and dark colors. Restart X after changing colors.</string>
+    <string name="piko_newx_custom_theme_system">Default color</string>
     <string name="piko_newx_custom_theme_pick_light">Light mode color</string>
     <string name="piko_newx_custom_theme_pick_dark">Dark mode color</string>
     <string name="piko_newx_custom_theme_hex_hint">HEX color (#RRGGBB)</string>
@@ -508,16 +507,17 @@
     <string name="piko_newx_custom_theme_saturation">Saturation</string>
     <string name="piko_newx_custom_theme_brightness">Brightness</string>
     <string name="piko_newx_custom_theme_reset">Reset both colors</string>
-    <string name="piko_newx_custom_theme_reset_confirm">Restore system colors for both light and dark modes?</string>
+    <string name="piko_newx_custom_theme_reset_confirm">Reset the saved light and dark colors?</string>
     <string name="piko_newx_custom_theme_invalid">Enter a valid six-digit HEX color, for example #D88CB5.</string>
     <string name="piko_newx_custom_theme_saved">Saved. Restart X to apply the selected colors.</string>
-    <string name="piko_newx_custom_theme_reset_done">Custom colors removed. Restart X to restore system colors.</string>
-    <string name="piko_newx_custom_theme_preview">Accent preview</string>
-    <string name="piko_newx_custom_theme_presets">Quick colors</string>
-    <string name="piko_newx_custom_theme_picker_help">Touch the square to choose a shade. Drag the rainbow to change hue.</string>
+    <string name="piko_newx_custom_theme_reset_done">Light and dark colors reset. Restart X to apply.</string>
+    <string name="piko_newx_custom_theme_preview">Color preview</string>
+    <string name="piko_newx_custom_theme_presets">Recent colors</string>
     <string name="piko_newx_custom_theme_hex_toggle">Enter a HEX color</string>
     <string name="piko_newx_composer_title">Composer</string>
     <string name="piko_newx_composer_summary">Customize the post composer</string>
     <string name="piko_newx_hide_audience_title">Hide audience selector</string>
     <string name="piko_newx_hide_audience_summary">Hide the audience button beside your avatar. The selected posting audience is unchanged.</string>
+    <string name="piko_newx_custom_theme_recent_title">Recent colors</string>
+    <string name="piko_newx_custom_theme_recent_summary">Stores up to five recently confirmed colors, newest first</string>
 </resources>
