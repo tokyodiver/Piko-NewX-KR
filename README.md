@@ -6,7 +6,7 @@
 
 [패치 파일 다운로드](https://github.com/tokyodiver/Piko-NewX-KR/releases/latest)
 
-원본 [crimera/piko-newx v3.64.1](https://github.com/crimera/piko-newx/releases/tag/v3.64.1)과 동일한 Piko x-lite `eaa255276df4e5514cae8fc42eb014fca83ea786` 기반의 비공식 수정본입니다. 원본처럼 NewX 전용으로 빌드합니다.
+원본 [crimera/piko-newx v3.65.0](https://github.com/crimera/piko-newx/releases/tag/v3.65.0)과 동일한 Piko x-lite `0dd6dcea52b0973e630ed568a58d2de047ae3417` 기반의 비공식 수정본입니다. 원본처럼 NewX 전용으로 빌드합니다.
 
 - NewX 설정 한국어 문자열 490개
 - 라이트·다크 색상 개별 설정, 추천 색상·사각형 색상판·색조 막대·접이식 HEX 입력
@@ -32,7 +32,7 @@
 
 ## 버전 표기
 
-원본 버전은 `3.64.1`로 유지하고 수정 차수를 `-v1`, `-v2`처럼 붙입니다. 현재 수정본은 `3.64.1-v5`, 파일명은 `piko-newx-kr-3.64.1-v5.mpp`입니다.
+원본 버전은 `3.65.0`로 유지하고 수정 차수를 `-v1`, `-v2`처럼 붙입니다. 현재 수정본은 `3.65.0-v1`, 파일명은 `piko-newx-kr-3.65.0-v1.mpp`입니다.
 
 ## 배포
 
