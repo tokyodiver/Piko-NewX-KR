@@ -10,6 +10,7 @@
 - `CustomMaterialColors`: HEX 검증, Piko 설정 레지스트리를 통한 저장/읽기, 기존 Material You 색상 리소스 호출 경로에만 사용자 선택 색상 적용.
 - `ColorSeedTransform`: 시스템의 Material You 역할별 색상에서 색조 및 채도를 상대적으로 이동하여 밝기/투명도 보존. **정확한 Material Color Utilities HCT 팔레트 생성은 아님.**
 - NewX 자체의 설정 UI 테마 색상도 가능한 동일한 리소스 경로에서 재매핑.
+- v5: 기본 테마에서도 사용자 지정 강조색을 적용합니다. 원본 팔레트의 PRIMARY·ON_PRIMARY·LINK 및 작성 도구용 강조색만 변경하고, 글자·미선택 액션·탭·배경·구분선은 원본 경로를 유지합니다. 라이트·다크 팔레트는 각 모드의 저장색을 사용합니다.
 
 ## UI에서 사용하는 방법 (실제 앱에서의 동작은 미검증)
 
@@ -23,8 +24,6 @@
 
 원본 프로젝트의 `./gradlew clean buildAndroid` (Windows: `gradlew.bat clean buildAndroid`) 명령. 성공하면 `patches/build/libs/patches-*.mpp` 확인. 이 프로젝트의 Gradle 9.8.2/Android SDK/사설 GitHub Packages(필요시 GITHUB_TOKEN) 의존성을 해결해야 함. 상위 `piko-newx` 빌드 스크립트는 별도 배포 자동화에 사용됨.
 
-**현재 작업 환경에는 Gradle 9.8.2가 설치돼 있지 않고 네트워크로 설치할 수도 없어 실제 Gradle 컴파일, `.mpp` 생성, APK 적용 테스트를 하지 못했습니다.**
-
-확인한 사항: 문자열 리소스 490개 XML 파싱/키/서식 지정자 검사 통과, 추가한 컬러 피커/설정 코드의 Java 스텁 컴파일 통과, 색상 변환에 대한 순수 Java 테스트 6개 통과. 앱 리소스 AAPT/Gradle/Kotlin DSL/단말 검사는 미실행.
+v5 검증: [GitHub Actions](https://github.com/tokyodiver/Piko-NewX-KR/actions/runs/40608221752)에서 `:patches:build buildAndroid :patches:lintNewxResolvers` 통과. 원본 X 12.37.2-prod.01 APKM에 새 MPP를 `patch-twitter.sh`로 적용해 Theme와 Hide audience selector의 Applied 및 APK 저장을 확인했습니다. 최종 DEX에서 세 원본 팔레트의 PRIMARY·ON_PRIMARY·LINK 인자와 invoke/result 레지스터를 검사했습니다. 실제 Java 클래스의 강조색·중립색 보존 로직은 Android API 스텁 환경에서 38개 검사를 통과했습니다. 실기기 UI와 다른 APK 버전은 이번 검증에 포함하지 않았습니다.
 
 개발자 소스는 GPLv3 기반이므로 원래 저장소의 LICENSE 및 NOTICE를 유지합니다.

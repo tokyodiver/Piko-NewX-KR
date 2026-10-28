@@ -31,7 +31,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN || github.token }}
         run: |
           chmod +x gradlew
-          ./gradlew :extensions:newx:tasks --all --console=plain
           ./gradlew :patches:build buildAndroid :patches:lintNewxResolvers --no-daemon --console=plain
       - name: Name custom patch bundle
         shell: bash
