@@ -2940,19 +2940,21 @@ private fun MutableMethod.injectDynamicPalette(
         )
     }
 
+    val nativeConstructor = resolvePaletteConstructor(allocation, constructorReference)
     if (!kind.isLight) {
         // Both dark factories own the same background family. The DIM palette stays reachable
         // from the app's own "dim" appearance paths, so the chooser must cover it too; otherwise
         // a dim-resolved surface keeps its blue-grey background while the rest of the app is
         // already on the selected style.
-        injectDarkBackgrounds(
-            resolvePaletteConstructor(allocation, constructorReference),
-        )
+        injectDarkBackgrounds(nativeConstructor)
     }
 
-    val nativeConstructor = resolvePaletteConstructor(allocation, constructorReference)
+    val nativeConstructorIndex = instructions.indexOf(nativeConstructor.instruction)
+    if (nativeConstructorIndex < 0) {
+        throw PatchException("NewX native palette constructor disappeared before accent injection: $this")
+    }
     injectNativeAccentColors(
-        nativeConstructor.index,
+        nativeConstructorIndex,
         nativeConstructor.instruction.startRegister,
         kind.isLight,
     )
