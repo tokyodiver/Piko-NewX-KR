@@ -916,10 +916,12 @@ private fun patchDynamicAccentPalettes() {
     expandedStandard.method.injectDynamicAccentTones(
         tonesByField,
         expandedStandard.scratchRegisterStart,
+        isLight = true,
     )
     expandedDark.method.injectDynamicAccentTones(
         tonesByField,
         expandedDark.scratchRegisterStart,
+        isLight = false,
     )
 }
 
@@ -2828,6 +2830,7 @@ private fun MutableMethod.injectLottieFallbackTint(activeLikeField: FieldReferen
 private fun MutableMethod.injectDynamicAccentTones(
     tonesByField: Map<String, Int>,
     scratchRegisterStart: Int,
+    isLight: Boolean,
 ) {
     val toneLoads =
         instructions.withIndex().mapNotNull { indexed ->
@@ -2900,6 +2903,15 @@ private fun MutableMethod.injectDynamicAccentTones(
                 enabledRegister,
             )
             moveResult(colorRegister, "J")
+            if (tone in 4..8) {
+                val brightness = if (isLight) "Light" else "Dark"
+                invokeStatic(
+                    methodReference("$DYNAMIC_COLOR_PALETTE_DESCRIPTOR->native${brightness}Accent(J)J"),
+                    colorRegister,
+                    colorRegister + 1,
+                )
+                moveResult(colorRegister, "J")
+            }
         }
     }
 }
@@ -2938,6 +2950,13 @@ private fun MutableMethod.injectDynamicPalette(
         )
     }
 
+    val nativeConstructor = resolvePaletteConstructor(allocation, constructorReference)
+    injectNativeAccentColors(
+        nativeConstructor.index,
+        nativeConstructor.instruction.startRegister,
+        kind.isLight,
+    )
+
     // The typed hook relocates every incoming label from the original new-instance onto the API
     // guard, exactly like the helper it replaces: every path that reached the allocation runs the
     // guard first. Its trailing no-op falls through into the byte-for-byte original allocation
@@ -2947,6 +2966,30 @@ private fun MutableMethod.injectDynamicPalette(
         relocateBranchTargets = true,
     ) {
         emitDynamicPaletteGuard(kind, paletteDescriptor, constructorReference)
+    }
+}
+
+internal fun MutableMethod.injectNativeAccentColors(
+    constructorIndex: Int,
+    constructorStartRegister: Int,
+    isLight: Boolean,
+) {
+    insertHook(
+        index = constructorIndex,
+        // Every path entering the native constructor must apply the same accent policy.
+        relocateBranchTargets = true,
+    ) {
+        val brightness = if (isLight) "Light" else "Dark"
+        for (token in listOf(0, 4, 5)) {
+            val colorRegister = constructorStartRegister + 2 + token * 2
+            val role = if (token == 4) "OnAccent" else "Accent"
+            invokeStatic(
+                methodReference("$DYNAMIC_COLOR_PALETTE_DESCRIPTOR->native$brightness$role(J)J"),
+                colorRegister,
+                colorRegister + 1,
+            )
+            moveResult(colorRegister, "J")
+        }
     }
 }
 

@@ -31,7 +31,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN || github.token }}
         run: |
           chmod +x gradlew
-          ./gradlew buildAndroid --console=plain
+          ./gradlew :patches:build buildAndroid :extensions:newx:testReleaseUnitTest --tests 'app.morphe.extension.newx.theme.*' --tests 'app.morphe.extension.newx.ui.ThemeStyleResolutionTest' :patches:lintNewxResolvers --no-daemon --console=plain
       - name: Name custom patch bundle
         shell: bash
         run: |
@@ -45,7 +45,7 @@ jobs:
           path: dist/*.mpp
           if-no-files-found: error
       - name: Publish release
-        if: "!contains(github.event.head_commit.message, '[build-only]')"
+        if: "github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[build-only]')"
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -54,9 +54,9 @@ jobs:
           tag="v$version"
           artifact="dist/piko-newx-kr-$version.mpp"
           test -s "$artifact"
-          gh release create "$tag" "$artifact" --target "$GITHUB_SHA" --title "Piko NewX KR $tag" --notes "Exact custom composer accent colors; neutral timeline reaction icons and counts preserved. Includes default-on audience hiding and color-save restart prompt. Based on upstream Piko NewX 3.64.1 (eaa2552). NewX only. Target X: 12.37.2-prod.01 APKM. Device testing pending." --latest
+          gh release create "$tag" "$artifact" --target "$GITHUB_SHA" --title "Piko NewX KR $tag" --notes "Default theme now supports custom light/dark accents while preserving native text, inactive action icons/counts, tabs, backgrounds, and dividers. Select Default, enable custom accent colors, and restart X. Material You and High Contrast retain their full-palette behavior. Based on Piko NewX 3.64.1 (eaa2552). Target X: 12.37.2-prod.01 APKM. Device UI testing pending." --latest
       - name: Update Morphe source metadata
-        if: "!contains(github.event.head_commit.message, '[build-only]')"
+        if: "github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[build-only]')"
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash

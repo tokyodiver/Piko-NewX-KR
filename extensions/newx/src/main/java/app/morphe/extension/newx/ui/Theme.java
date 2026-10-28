@@ -247,7 +247,7 @@ public final class Theme {
     }
 
     private static int primaryAccent(Context context, boolean dynamicColors) {
-        Integer custom = dynamicColors ? CustomMaterialColors.selectedColor(isDark(context)) : null;
+        Integer custom = customAccent(context, dynamicColors);
         if (custom != null) return custom;
         TwitterTheme.Accent accent = TwitterTheme.accent(context);
         if (usesDynamicAccent(dynamicColors, accent)) {
@@ -257,13 +257,21 @@ public final class Theme {
     }
 
     private static int onPrimaryAccent(Context context, boolean dynamicColors) {
-        Integer custom = dynamicColors ? CustomMaterialColors.selectedColor(isDark(context)) : null;
+        Integer custom = customAccent(context, dynamicColors);
         if (custom != null) return CustomMaterialColors.onAccent(custom);
         TwitterTheme.Accent accent = TwitterTheme.accent(context);
         if (usesDynamicAccent(dynamicColors, accent)) {
             return dynamicColor(context, "on_primary", accent.onPrimaryColor(), dynamicColors);
         }
         return accent.onPrimaryColor();
+    }
+
+    private static Integer customAccent(Context context, boolean dynamicColors) {
+        boolean nativeAccent = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                && SettingsRegistry.isRegistered(THEME_SETTING)
+                && THEME_DEFAULT.equals(themeStyle());
+        return dynamicColors || nativeAccent
+                ? CustomMaterialColors.selectedColor(isDark(context)) : null;
     }
 
     private static int primaryContainer(Context context, boolean dynamicColors) {
@@ -322,6 +330,8 @@ public final class Theme {
     }
 
     private static int checkboxChecked(Context context, boolean dynamicColors) {
+        Integer custom = customAccent(context, dynamicColors);
+        if (custom != null) return custom;
         TwitterTheme.Accent accent = TwitterTheme.accent(context);
         if (usesDynamicAccent(dynamicColors, accent)) {
             int base = isDark(context) ? Color.WHITE : Color.rgb(15, 20, 25);

@@ -101,6 +101,36 @@ public final class DynamicColorPalette {
         return isSupported() && !useDimTheme() && !useDefaultTheme();
     }
 
+    public static boolean isAccentEnabled() {
+        return isEnabled() || (isSupported() && useDefaultTheme()
+                && CustomMaterialColors.isConfigured(isDarkTheme()));
+    }
+
+    public static long nativeLightAccent(long originalColor) {
+        return nativeAccent(false, false, originalColor);
+    }
+
+    public static long nativeDarkAccent(long originalColor) {
+        return nativeAccent(true, false, originalColor);
+    }
+
+    public static long nativeLightOnAccent(long originalColor) {
+        return nativeAccent(false, true, originalColor);
+    }
+
+    public static long nativeDarkOnAccent(long originalColor) {
+        return nativeAccent(true, true, originalColor);
+    }
+
+    private static long nativeAccent(boolean dark, boolean foreground, long originalColor) {
+        if (!isSupported() || !useDefaultTheme()) return originalColor;
+        Integer chosen = CustomMaterialColors.selectedColor(dark);
+        if (chosen == null) return originalColor;
+        int rgb = foreground ? CustomMaterialColors.onAccent(chosen) : chosen;
+        int alpha = (int) (originalColor >>> 32) & 0xFF000000;
+        return pack(alpha | (rgb & 0x00FFFFFF));
+    }
+
     /** Whether the theme chooser selected Material You system surfaces. */
     public static boolean useMaterialBackground() {
         return THEME_MATERIAL.equals(themeStyle());
@@ -475,7 +505,7 @@ public final class DynamicColorPalette {
     }
 
     private static boolean isLikeThemingEnabled() {
-        return isEnabled() && SettingsRegistry.getBooleanOrDefault(DYNAMIC_LIKE_SETTING, false);
+        return isAccentEnabled() && SettingsRegistry.getBooleanOrDefault(DYNAMIC_LIKE_SETTING, false);
     }
 
     private static long dynamicColor(boolean dark, String lightName, String darkName) {

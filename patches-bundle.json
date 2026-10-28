@@ -1,8 +1,8 @@
 {
-  "version": "v3.64.1-v4",
-  "download_url": "https://github.com/tokyodiver/Piko-NewX-KR/releases/download/v3.64.1-v4/piko-newx-kr-3.64.1-v4.mpp",
-  "created_at": "2026-10-27T14:05:04",
-  "description": "Piko NewX KR v4: exact custom composer accent colors; neutral timeline actions preserved. Includes v3 fixes. Device UI testing pending.",
+  "version": "v3.64.1-v5",
+  "download_url": "https://github.com/tokyodiver/Piko-NewX-KR/releases/download/v3.64.1-v5/piko-newx-kr-3.64.1-v5.mpp",
+  "created_at": "2026-10-28T00:13:57",
+  "description": "Piko NewX KR v5: custom accents on the Default theme preserve native text, inactive actions, and surfaces. Separate light/dark colors. Device UI testing pending.",
   "app_version": "12.37.2-prod.01",
   "piko_commit": "eaa255276df4e5514cae8fc42eb014fca83ea786"
 }
