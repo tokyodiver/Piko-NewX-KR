@@ -51,7 +51,7 @@ echo "Patcher JVM heap limit: ${PATCHER_MAX_HEAP_MB} MB"
 if [[ "${PIKO_PATCH_SMOKE:-false}" == true ]]; then
   java "-Xmx${PATCHER_MAX_HEAP_MB}m" -jar "$MORPHE_CLI_JAR" patch \
     -p "$MPP" --unsigned --exclusive \
-    -e "NewX: Theme" -e "NewX: Hide audience selector" \
+    -e "NewX: Theme" -e "NewX: Hide audience selector" -e "NewX: Custom font" \
     --striplibs=arm64-v8a --force -o "$OUTPUT_APK" -- "$APK"
   exit 0
 fi

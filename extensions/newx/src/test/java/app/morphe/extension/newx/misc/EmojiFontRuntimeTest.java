@@ -32,8 +32,13 @@ public final class EmojiFontRuntimeTest {
     // Reproduces fonts accepted by the picker but failing during Android loading or rendering.
     @Test public void importedAppleFontsLoadAndRenderThroughTheExtension() throws Exception {
         Class<?> utils = Class.forName("app.morphe.extension.shared.Utils");
-        utils.getMethod("setContext", android.content.Context.class)
-                .invoke(null, RuntimeEnvironment.getApplication());
+        for (Field field : utils.getDeclaredFields()) {
+            if (field.getType() == android.content.Context.class
+                    && java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+                field.setAccessible(true);
+                field.set(null, RuntimeEnvironment.getApplication());
+            }
+        }
         String id = "newx.content.custom_emoji_font.enabled";
         Field settings = SettingsRegistry.class.getDeclaredField("SETTINGS");
         settings.setAccessible(true);
