@@ -26,7 +26,7 @@ import app.morphe.extension.crimera.settings.SettingsRegistry;
 import app.morphe.extension.shared.settings.BooleanSetting;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk = {29, 34}, manifest = Config.NONE)
+@Config(sdk = {36, 37}, manifest = Config.NONE)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class EmojiFontRuntimeTest {
     // Reproduces fonts accepted by the picker but failing during Android loading or rendering.
@@ -52,8 +52,16 @@ public final class EmojiFontRuntimeTest {
             assertTrue(source.toString(), source.isFile());
             File installed = new File(RuntimeEnvironment.getApplication().getFilesDir(),
                     UpdateFont.EMOJI_FONT_FILE_NAME);
-            java.nio.file.Files.copy(source.toPath(), installed.toPath(),
-                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            java.lang.reflect.Method valid = UpdateFont.class.getDeclaredMethod(
+                    "hasValidFontHeader", android.content.Context.class, android.net.Uri.class);
+            valid.setAccessible(true);
+            android.net.Uri uri = android.net.Uri.fromFile(source);
+            assertEquals(name, true, valid.invoke(null, RuntimeEnvironment.getApplication(), uri));
+            java.lang.reflect.Method copy = UpdateFont.class.getDeclaredMethod(
+                    "copyFont", android.content.Context.class, android.net.Uri.class, boolean.class);
+            copy.setAccessible(true);
+            assertEquals(name, true, copy.invoke(null, RuntimeEnvironment.getApplication(), uri, true));
+            assertEquals(source.length(), installed.length());
             UpdateFont.loadFont(UpdateFont.EMOJI_FONT_FILE_NAME, true);
             CharSequence processed = UpdateFont.processComposeEmoji(input);
             assertTrue(name, processed instanceof Spannable);

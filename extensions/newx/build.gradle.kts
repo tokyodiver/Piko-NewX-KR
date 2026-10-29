@@ -36,3 +36,9 @@ dependencies {
     testImplementation(project(path = ":extensions:shared:media3", configuration = "shadowedMedia3"))
     testImplementation("org.robolectric:robolectric:4.17")
 }
+
+tasks.withType<Test>().configureEach {
+    javaLauncher.set(javaToolchains.launcherFor {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    })
+}
