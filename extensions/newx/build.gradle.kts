@@ -29,6 +29,7 @@ dependencies {
     compileOnly(project(path = ":extensions:shared:media3", configuration = "shadowedMedia3"))
 
     testImplementation(project(":extensions:newx:stub"))
+    testImplementation(project(":extensions:shared:library"))
     testImplementation(libs.piko.extension.library)
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")

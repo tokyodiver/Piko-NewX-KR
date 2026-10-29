@@ -29,13 +29,32 @@ jobs:
         run: sdkmanager "platforms;android-34" "platforms;android-36" "build-tools;34.0.0" "build-tools;36.0.0"
       - name: Prepare NewX-only source
         run: python3 .github/scripts/prepare_newx.py
+      - name: Download reported emoji fonts
+        env:
+          EMOJI_FONT_DIR: ${{ runner.temp }}/emoji-fonts
+        run: |
+          mkdir -p "$EMOJI_FONT_DIR"
+          curl -fL --retry 3 https://github.com/samuelngs/apple-emoji-ttf/releases/download/macos-26-20260722-484daf4e/AppleColorEmoji-Linux.ttf -o "$EMOJI_FONT_DIR/AppleColorEmoji-Linux.ttf"
+          curl -fL --retry 3 https://raw.githubusercontent.com/n4bi10p/Ios-emoji/HEAD/system/fonts/NotoColorEmoji.ttf -o "$EMOJI_FONT_DIR/iOS-Emoji-Android.ttf"
+          echo "e37c7af6265ac4a0af6d57bc65e86109a776d9966e8343334557f63da482516f  $EMOJI_FONT_DIR/AppleColorEmoji-Linux.ttf" | sha256sum -c
+          echo "f06ab19cd58f6c42ee7e367205e54dd7931c1344b641b977a415a279cf11319f  $EMOJI_FONT_DIR/iOS-Emoji-Android.ttf" | sha256sum -c
       - name: Build patch bundle
         env:
+          EMOJI_FONT_DIR: ${{ runner.temp }}/emoji-fonts
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN || github.token }}
         run: |
           chmod +x gradlew
-          ./gradlew :patches:build buildAndroid :patches:lintNewxResolvers :extensions:newx:testDebugUnitTest --tests 'app.morphe.extension.newx.theme.CustomMaterialColorsTest' --tests 'app.morphe.extension.newx.theme.DynamicColorPaletteTest' --tests 'app.morphe.extension.newx.ui.ThemeStyleResolutionTest' --no-daemon --console=plain
+          ./gradlew :patches:build buildAndroid :patches:lintNewxResolvers :extensions:newx:testDebugUnitTest --tests 'app.morphe.extension.newx.misc.EmojiFontRuntimeTest' --tests 'app.morphe.extension.newx.theme.DynamicColorPaletteTest' --tests 'app.morphe.extension.newx.ui.ThemeStyleResolutionTest' --no-daemon --console=plain
+      - name: Upload emoji diagnostic results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emoji-diagnostics
+          path: |
+            ${{ runner.temp }}/emoji-fonts/*.png
+            extensions/newx/build/test-results/
+            extensions/newx/build/reports/tests/
       - name: Name custom patch bundle
         shell: bash
         run: |
