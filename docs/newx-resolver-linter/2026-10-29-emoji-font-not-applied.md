@@ -17,3 +17,12 @@
 - 진단 도구 첫 실행은 테스트용 BooleanSetting 스텁과 Utils.setContext 내부 BaseSettings의 생성자 불일치로 실패. 실제 앱 장애가 아님. 테스트 컨텍스트 주입을 분리한 후 통과.
 - 원인 분류: 실기기 런타임 동작, 아직 미확정. 리졸버·카디널리티·린터 오류 증거 없음.
 - 한계: 실제 Samsung 장치, Compose 전체 화면, 파일 선택기/설정 저장 및 설치된 패치 버전을 아직 검증하지 못함. 제품 수정·정식 배포 없음.
+
+## 추가 검증: Galaxy S26 최신 OS 범위
+- 사용자 기기: Galaxy S26, 최신 OS(정확한 설치 빌드 번호는 미확인). 이전 제공 APK 12.37.2를 계속 기준으로 사용.
+- 진단 소스 570008c, https://github.com/tokyodiver/Piko-NewX-KR/actions/runs/40817990277 — 성공.
+- API 36·37(Android 16·17) / Java 21 / Robolectric native graphics에서 동일 두 폰트 검증 성공. 실제 hasValidFontHeader 및 copyFont로 내부 파일 저장 후 loadFont → processComposeEmoji → span 측정·컬러 그리기까지 실행.
+- API 36·37 테스트 2개 실패 0개. 이전 API 29·34 테스트 2개 실패 0개와 합계 4개 성공.
+- 도구 준비 중 Java 21의 jdk.internal.access 접근 제한 발생, 테스트 JVM --add-opens 설정 후 해결. 제품 코드 변경 없음.
+- APK manifest의 NewXSettingsActivity 등록 및 파일 선택 결과에서 UpdateFont.handleActivityResult 호출 확인.
+- 결론: 제공 폰트와 배포된 이모지 교체 코드의 기본 작동은 통제된 Android 10·14·16·17 환경에서 확인. 실제 Samsung One UI 화면/설정 저장 상태/설치 버전에서 발생하는 증상은 미재현·원인 미확정. 수정 완료로 보고하지 않음.
