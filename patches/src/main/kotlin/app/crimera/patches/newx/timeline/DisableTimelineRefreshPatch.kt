@@ -8,10 +8,12 @@ import app.crimera.patches.newx.settings.newXToggle
 import app.crimera.patches.settings.settingStrings
 import app.crimera.patches.newx.utils.Constants.COMPATIBILITY_NEW_X
 import app.crimera.patches.common.isAssignableTo
+import app.crimera.bytecode.RegisterLimit
 import app.crimera.bytecode.Target
 import app.crimera.bytecode.fieldReference
 import app.crimera.bytecode.insertHook
 import app.crimera.bytecode.methodReference
+import app.crimera.patches.common.classDefFlatMap
 import app.crimera.patches.common.requireAtMostOne
 import app.crimera.patches.common.requireExactlyOne
 import app.crimera.patches.common.scopedMatchAll
@@ -29,8 +31,18 @@ import app.morphe.patcher.util.p0Register
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.NarrowLiteralInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
+import com.android.tools.smali.dexlib2.iface.ClassDef
+import com.android.tools.smali.dexlib2.iface.Method
+import com.android.tools.smali.dexlib2.iface.instruction.Instruction
+import com.android.tools.smali.dexlib2.iface.reference.StringReference
+import app.crimera.patches.newx.misc.inlineactions.controlFlowSuccessors
+import app.crimera.patches.newx.misc.inlineactions.provesParameterValue
+import app.crimera.patches.newx.misc.inlineactions.provesValueFromInstruction
+import app.crimera.patches.newx.misc.inlineactions.reachableIndicesFrom
 
 private const val ENUM_DESCRIPTOR = "Ljava/lang/Enum;"
 private const val URT_REPOSITORY_PACKAGE = "Lcom/x/repositories/urt/"
@@ -61,6 +73,11 @@ private const val IS_FOR_YOU_FILTER_REFRESH_PENDING_DESCRIPTOR =
     "$TIMELINE_REFRESH_GATE_DESCRIPTOR->isForYouFilterRefreshPending()Z"
 private const val IS_TIMELINE_DATA_EMPTY_DESCRIPTOR =
     "$TIMELINE_REFRESH_GATE_DESCRIPTOR->isTimelineDataEmpty($LIST_DESCRIPTOR)Z"
+private const val MARK_RESTORE_REFRESH_DESCRIPTOR =
+    "$TIMELINE_REFRESH_GATE_DESCRIPTOR->markRestoreRefresh()V"
+private const val CONSUME_RESTORE_REFRESH_CLEAR_CACHE_DESCRIPTOR =
+    "$TIMELINE_REFRESH_GATE_DESCRIPTOR->consumeRestoreRefreshClearCache($ENUM_DESCRIPTOR)Z"
+private const val CLEAR_CACHE_INSTRUCTION_TYPE_NAME = "TimelineClearCache"
 private const val RESTORE_TIMELINE_POSITION_DESCRIPTOR =
     "$TIMELINE_POSITION_STORE_DESCRIPTOR->restore($ENUM_DESCRIPTOR$STRING_DESCRIPTOR)[I"
 private const val URT_SUPPRESS_LABEL = "piko_newx_refresh_urt_suppress"
@@ -147,9 +164,21 @@ private object NewXUrtAutoRefreshEventFingerprint : Fingerprint(
                     reference.returnType == "V"
             }
         }
-        autoRefreshFieldReads.size == 1 && refreshRequestCalls.size == 1
+        // 12.40.1 added a second dispatch for the ReloadTimelineInPlace event; the patch selects
+        // the RefreshTimeline one by control flow after matching.
+        autoRefreshFieldReads.isNotEmpty() && refreshRequestCalls.size == autoRefreshFieldReads.size
     },
 )
+
+// The Apollo type object for the URT TimelineClearCache instruction; its <clinit> names it.
+private object NewXTimelineClearCacheTypeFingerprint : Fingerprint(
+    definingClass = "Lcom/x/android/type/",
+    name = "<clinit>",
+    strings = listOf(CLEAR_CACHE_INSTRUCTION_TYPE_NAME),
+)
+
+private fun FieldReference.isSameField(other: FieldReference): Boolean =
+    definingClass == other.definingClass && name == other.name && type == other.type
 
 @Suppress("unused")
 val disableTimelineRefreshPatch =
@@ -249,22 +278,8 @@ val disableTimelineRefreshPatch =
             }
 
             val autoRefreshEventMethod = autoRefreshEventMatches.single().method
-            val autoRefreshFieldCandidates =
-                autoRefreshEventMethod.instructions.withIndex().filter { indexedInstruction ->
-                    if (indexedInstruction.value.opcode != Opcode.SGET_OBJECT) return@filter false
-                    val reference = indexedInstruction.value.getReference<com.android.tools.smali.dexlib2.iface.reference.FieldReference>()
-                        ?: return@filter false
-                    reference.name == "AUTO_REFRESH" &&
-                        reference.type.startsWith("L")
-                }
-            if (autoRefreshFieldCandidates.size != 1) {
-                throw PatchException(
-                    "Expected one NewX URT automatic-refresh request-type read, found " +
-                        "${autoRefreshFieldCandidates.size}",
-                )
-            }
-
-            val autoRefreshFieldCandidate = autoRefreshFieldCandidates.single()
+            val autoRefreshFieldCandidate =
+                resolveRefreshTimelineAutoRefreshRead(autoRefreshEventMethod) { type -> classDefByOrNull(type) }
             val autoRefreshFieldInstruction =
                 autoRefreshFieldCandidate.value as? OneRegisterInstruction
                     ?: throw PatchException("NewX URT automatic-refresh request-type read has no register layout")
@@ -275,8 +290,10 @@ val disableTimelineRefreshPatch =
             val autoRefreshRegister = autoRefreshFieldInstruction.registerA
             val requestCallCandidate =
                 autoRefreshEventMethod.instructions.withIndex().firstOrNull { indexedInstruction ->
-                    if (indexedInstruction.index <= autoRefreshFieldCandidate.index ||
-                        indexedInstruction.value.opcode != Opcode.INVOKE_INTERFACE
+                    // The request must consume the selected read directly.
+                    if (indexedInstruction.index != autoRefreshFieldCandidate.index + 1 ||
+                        indexedInstruction.value.opcode != Opcode.INVOKE_INTERFACE ||
+                        (indexedInstruction.value as? FiveRegisterInstruction)?.registerD != autoRefreshRegister
                     ) {
                         return@firstOrNull false
                     }
@@ -523,6 +540,8 @@ val disableTimelineRefreshPatch =
                     moveResult(settingRegister, "[I")
                     ifEqz(settingRegister, Target.Original)
                     sget(requestRegister, fieldReference(repositoryViewportAwareAutoRefreshFieldReference))
+                    // The converted refresh's ClearCache must not drop the restored rows.
+                    invokeStatic(methodReference(MARK_RESTORE_REFRESH_DESCRIPTOR))
                     goto(Target.Original)
                 }
             }
@@ -540,16 +559,14 @@ val disableTimelineRefreshPatch =
                         ),
                     registerConstraint = SettingReadRegisterConstraint.FOUR_BIT,
                 )
-            val shiftedAutoRefreshFieldIndex =
-                autoRefreshEventMethod.instructions.indexOfFirst { instruction ->
-                    instruction.opcode == Opcode.SGET_OBJECT &&
-                        instruction.getReference<com.android.tools.smali.dexlib2.iface.reference.FieldReference>()?.let {
-                            it.definingClass == autoRefreshFieldReference.definingClass &&
-                                it.name == autoRefreshFieldReference.name &&
-                                it.type == autoRefreshFieldReference.type
-                        } == true
-                }
-            if (shiftedAutoRefreshFieldIndex < 0) {
+            // The handler may hold several AUTO_REFRESH reads; the selected one is where the read was inserted.
+            val shiftedAutoRefreshFieldIndex = settingRead.nextIndex
+            val shiftedAutoRefreshFieldInstruction =
+                autoRefreshEventMethod.instructions.getOrNull(shiftedAutoRefreshFieldIndex)
+            if (shiftedAutoRefreshFieldInstruction?.opcode != Opcode.SGET_OBJECT ||
+                shiftedAutoRefreshFieldInstruction.getReference<FieldReference>()
+                    ?.isSameField(autoRefreshFieldReference) != true
+            ) {
                 throw PatchException("NewX URT automatic-refresh request-type read moved unexpectedly")
             }
             if (settingRead.register == 0 || settingRead.register == 1) {
@@ -580,5 +597,204 @@ val disableTimelineRefreshPatch =
                 ifNez(settingRead.register, Target.Original)
                 returnVoid()
             }
+
+            // The one URT method that reads the ClearCache type sets a flag that makes X drop cached entries.
+            val clearCacheTypeMatch =
+                requireExactlyOne(
+                    "NewX URT TimelineClearCache type",
+                    NewXTimelineClearCacheTypeFingerprint.scopedMatchAll(),
+                )
+            val clearCacheTypeClass = clearCacheTypeMatch.originalClassDef.type
+            val clearCacheTypeFieldCandidates =
+                clearCacheTypeMatch.originalMethod.implementation?.instructions?.toList().orEmpty()
+                    .mapNotNull { instruction ->
+                        if (instruction.opcode != Opcode.SPUT_OBJECT) return@mapNotNull null
+                        instruction.getReference<FieldReference>()?.takeIf { reference ->
+                            reference.definingClass == clearCacheTypeClass
+                        }
+                    }
+            val clearCacheTypeField =
+                requireExactlyOne("NewX URT TimelineClearCache type field", clearCacheTypeFieldCandidates)
+            // Scan immutably and by package: mutable proxies for every APK class exhaust patch-time memory.
+            val clearCacheReaderCandidates =
+                classDefFlatMap { classDef ->
+                    if (!classDef.type.startsWith(URT_REPOSITORY_PACKAGE)) return@classDefFlatMap emptyList()
+                    classDef.methods.filter { method ->
+                        method.implementation?.instructions?.any { instruction ->
+                            instruction.opcode == Opcode.SGET_OBJECT &&
+                                instruction.getReference<FieldReference>()?.isSameField(clearCacheTypeField) == true
+                        } == true
+                    }
+                }
+            val clearCacheReader =
+                requireExactlyOne("NewX URT ClearCache instruction reader", clearCacheReaderCandidates)
+            val clearCacheReaderMethod =
+                requireExactlyOne(
+                    "NewX URT ClearCache instruction reader method",
+                    mutableClassDefBy(clearCacheReader.definingClass).methods.filter { method ->
+                        method.name == clearCacheReader.name &&
+                            method.returnType == clearCacheReader.returnType &&
+                            method.parameterTypes.map(CharSequence::toString) ==
+                                clearCacheReader.parameterTypes.map(CharSequence::toString)
+                    },
+                )
+            val clearCacheReaderInstructions = clearCacheReaderMethod.instructions.toList()
+            val clearCacheTypeReadIndex =
+                requireExactlyOne(
+                    "NewX URT ClearCache type read",
+                    clearCacheReaderInstructions.withIndex().filter { (_, instruction) ->
+                        instruction.opcode == Opcode.SGET_OBJECT &&
+                            instruction.getReference<FieldReference>()?.isSameField(clearCacheTypeField) == true
+                    }.map { it.index },
+                )
+            val clearCacheIfEqzIndex =
+                (clearCacheTypeReadIndex + 1..minOf(clearCacheTypeReadIndex + 6, clearCacheReaderInstructions.lastIndex))
+                    .firstOrNull { index -> clearCacheReaderInstructions[index].opcode == Opcode.IF_EQZ }
+                    ?: throw PatchException(
+                        "NewX URT ClearCache type read at index $clearCacheTypeReadIndex has no if-eqz within six instructions",
+                    )
+            // The flag is the literal 1 written in the fall-through, before the goto that leaves the response.
+            val clearCacheFlagWriteIndex =
+                requireExactlyOne(
+                    "NewX URT ClearCache flag write",
+                    clearCacheReaderInstructions.withIndex()
+                        .drop(clearCacheIfEqzIndex + 1)
+                        .takeWhile { (_, instruction) ->
+                            instruction.opcode !in setOf(Opcode.GOTO, Opcode.GOTO_16, Opcode.GOTO_32)
+                        }
+                        .filter { (_, instruction) ->
+                            instruction.opcode in setOf(Opcode.CONST_4, Opcode.CONST_16) &&
+                                (instruction as? NarrowLiteralInstruction)?.narrowLiteral == 1
+                        }
+                        .map { it.index },
+                )
+            val clearCacheFlagRegister =
+                (clearCacheReaderInstructions[clearCacheFlagWriteIndex] as OneRegisterInstruction).registerA
+            val clearCacheRequestTypeField =
+                requireExactlyOne(
+                    "NewX URT ClearCache request-type field",
+                    mutableClassDefBy(clearCacheReaderMethod.definingClass).fields.filter { field ->
+                        !AccessFlags.STATIC.isSet(field.accessFlags) && field.type == requestTypeDescriptor
+                    },
+                )
+            clearCacheReaderMethod.insertHook(
+                index = clearCacheFlagWriteIndex + 1,
+                // The flag register carries the ClearCache answer past the consume call.
+                excludedRegisters = listOf(clearCacheFlagRegister),
+                // Only the ClearCache path falls into this write. The goto after it is shared, so
+                // branches onto it must keep skipping the hook.
+                relocateBranchTargets = false,
+            ) {
+                val typeRegister = scratchRegister(RegisterLimit.FOUR_BIT)
+                move(typeRegister, clearCacheReaderMethod.p0Register, clearCacheReaderMethod.definingClass)
+                iget(typeRegister, typeRegister, clearCacheRequestTypeField)
+                invokeStatic(methodReference(CONSUME_RESTORE_REFRESH_CLEAR_CACHE_DESCRIPTOR), typeRegister)
+                moveResult(typeRegister, "Z")
+                ifEqz(typeRegister, Target.Original)
+                constInt(clearCacheFlagRegister, 0)
+            }
         }
     }
+
+private const val REFRESH_TIMELINE_EVENT_NAME = "RefreshTimeline"
+private val CONSTANT_LOAD_OPCODES = setOf(Opcode.CONST_4, Opcode.CONST_16, Opcode.CONST, Opcode.CONST_HIGH16)
+private const val INTRINSICS_ARE_EQUAL_DESCRIPTOR =
+    "Lkotlin/jvm/internal/Intrinsics;->areEqual(Ljava/lang/Object;Ljava/lang/Object;)Z"
+
+/**
+ * The URT event handler routes every timeline event, and since 12.40.1 both RefreshTimeline and
+ * ReloadTimelineInPlace (used by Explore) request AUTO_REFRESH. Only RefreshTimeline is the automatic
+ * refresh: select the read reached when `areEqual(event, RefreshTimeline)` holds and unreachable when it does not.
+ */
+private fun resolveRefreshTimelineAutoRefreshRead(
+    method: Method,
+    classDefByOrNull: (String) -> ClassDef?,
+): IndexedValue<Instruction> {
+    val instructions = method.implementation?.instructions?.toList()
+        ?: throw PatchException("NewX URT event handler has no implementation: $method")
+    val eventInterface = method.parameterTypes.singleOrNull()?.toString()
+        ?: throw PatchException("NewX URT event handler does not take one event: $method")
+    val eventRegister = method.p0Register + 1
+    val refreshEventField =
+        requireExactlyOne(
+            "NewX URT RefreshTimeline event singleton read",
+            instructions.mapNotNull { instruction ->
+                if (instruction.opcode != Opcode.SGET_OBJECT) return@mapNotNull null
+                instruction.getReference<FieldReference>()?.takeIf { reference ->
+                    reference.definingClass == reference.type &&
+                        classDefByOrNull(reference.type)?.isNamedEvent(eventInterface) == true
+                }
+            }.distinctBy { "${it.definingClass}->${it.name}:${it.type}" },
+        )
+    val refreshEventBranch =
+        requireExactlyOne(
+            "NewX URT RefreshTimeline event comparison",
+            instructions.indices.mapNotNull { index ->
+                val call = instructions[index]
+                if (call.opcode != Opcode.INVOKE_STATIC ||
+                    call.getReference<MethodReference>()?.toString() != INTRINSICS_ARE_EQUAL_DESCRIPTOR
+                ) {
+                    return@mapNotNull null
+                }
+                val arguments = (call as FiveRegisterInstruction).let { listOf(it.registerC, it.registerD) }
+                val comparesEvent = arguments.any { register ->
+                    method.provesParameterValue(index, register, eventRegister)
+                }
+                val comparesRefresh = arguments.any { register ->
+                    (0 until index).any { source ->
+                        val read = instructions[source]
+                        read.opcode == Opcode.SGET_OBJECT &&
+                            (read as OneRegisterInstruction).registerA == register &&
+                            read.getReference<FieldReference>()?.isSameField(refreshEventField) == true &&
+                            method.provesValueFromInstruction(source, register, index, register)
+                    }
+                }
+                if (!comparesEvent || !comparesRefresh) return@mapNotNull null
+                val result = instructions.getOrNull(index + 1)
+                    ?.takeIf { it.opcode == Opcode.MOVE_RESULT } as? OneRegisterInstruction
+                    ?: return@mapNotNull null
+                // Constant loads may sit between the result and its branch.
+                val branchIndex = (index + 2 until instructions.size).firstOrNull { candidate ->
+                    instructions[candidate].opcode !in CONSTANT_LOAD_OPCODES
+                } ?: return@mapNotNull null
+                branchIndex.takeIf {
+                    instructions[it].opcode == Opcode.IF_EQZ &&
+                        (instructions[it] as OneRegisterInstruction).registerA == result.registerA &&
+                        method.provesValueFromInstruction(index + 1, result.registerA, it, result.registerA)
+                }
+            },
+        )
+    val successors = method.controlFlowSuccessors()
+        ?: throw PatchException("NewX URT event handler control flow could not be decoded: $method")
+    val branchTargets = successors[refreshEventBranch]
+    val matchedEntry = refreshEventBranch + 1
+    val otherEntry = requireExactlyOne(
+        "NewX URT RefreshTimeline mismatch branch target",
+        branchTargets.filter { it != matchedEntry },
+    )
+    val reachedOnMatch = successors.reachableIndicesFrom(matchedEntry)
+        ?: throw PatchException("NewX URT RefreshTimeline branch reachability is malformed: $method")
+    val reachedOtherwise = successors.reachableIndicesFrom(otherEntry)
+        ?: throw PatchException("NewX URT non-RefreshTimeline branch reachability is malformed: $method")
+    return requireExactlyOne(
+        "NewX URT RefreshTimeline AUTO_REFRESH read",
+        instructions.withIndex().filter { (index, instruction) ->
+            instruction.opcode == Opcode.SGET_OBJECT &&
+                instruction.getReference<FieldReference>()?.let { reference ->
+                    reference.name == "AUTO_REFRESH" && reference.type.startsWith("L")
+                } == true &&
+                index in reachedOnMatch &&
+                index !in reachedOtherwise
+        },
+    ) { (index, _) -> "AUTO_REFRESH read at $index" }
+}
+
+/** A singleton event of [eventInterface] whose toString is the RefreshTimeline name. */
+private fun ClassDef.isNamedEvent(eventInterface: String): Boolean =
+    eventInterface in interfaces &&
+        methods.any { method ->
+            method.name == "toString" && method.parameterTypes.isEmpty() &&
+                method.implementation?.instructions?.any { instruction ->
+                    instruction.getReference<StringReference>()?.string == REFRESH_TIMELINE_EVENT_NAME
+                } == true
+        }

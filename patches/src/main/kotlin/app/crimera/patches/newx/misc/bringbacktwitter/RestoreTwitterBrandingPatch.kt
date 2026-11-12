@@ -8,18 +8,304 @@ package app.crimera.patches.newx.misc.bringbacktwitter
 
 import app.crimera.patches.newx.utils.unsupportedOnMount
 import app.crimera.patches.newx.utils.Constants.COMPATIBILITY_NEW_X
+import app.crimera.bytecode.insertHook
 import app.crimera.patches.common.requireAtMostOne
+import app.crimera.patches.common.requireExactlyOne
+import app.crimera.patches.common.scopedMatchAllOrNull
+import app.morphe.patcher.string
+import app.morphe.patcher.Fingerprint
+import app.morphe.patcher.patch.PatchException
+import app.morphe.patcher.patch.BytecodePatchContext
+import app.morphe.patcher.patch.bytecodePatch
 import app.morphe.patcher.patch.resourcePatch
+import app.morphe.patcher.util.getReference
+import app.morphe.patcher.util.p0Register
+import app.morphe.patcher.util.registersUsed
 import app.morphe.patches.all.misc.resources.addAppResources
 import app.morphe.patches.all.misc.resources.addResourcesPatch
 import app.morphe.util.ResourceGroup
 import app.morphe.util.copyResources
 import app.morphe.util.findElementByAttributeValue
+import com.android.tools.smali.dexlib2.Opcode
+import com.android.tools.smali.dexlib2.AccessFlags
+import com.android.tools.smali.dexlib2.iface.Method
+import app.morphe.patcher.extensions.InstructionExtensions.instructions
+import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod
+import com.android.tools.smali.dexlib2.builder.BuilderOffsetInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.ThreeRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.reference.FieldReference
+import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import org.w3c.dom.Element
 import java.io.FileWriter
 import java.nio.file.Files
 
+private const val SDK_INT_FIELD = "Landroid/os/Build\$VERSION;->SDK_INT:I"
 private const val SPLASH_BACKGROUND = "@color/twitter_splash_background"
+
+private const val SURFACE_CONTROL_BUILDER_DESCRIPTOR = "Landroid/view/SurfaceControl\$Builder;"
+private const val ATTACHED_SURFACE_CONTROL_DESCRIPTOR = "Landroid/view/AttachedSurfaceControl;"
+
+internal fun resolveLaunchRevealRenderer(
+    markerMethods: Collection<Method>,
+    rendererCandidates: Collection<Method>,
+): Method? {
+    if (markerMethods.isEmpty()) return null
+    return requireExactlyOne(
+        label = "NewX launch reveal renderer after marker",
+        candidates = rendererCandidates,
+    )
+}
+
+private fun Method.codeInstructions() = implementation?.instructions?.toList().orEmpty()
+
+private fun Method.invokeReferences(): List<Pair<Int, MethodReference>> =
+    codeInstructions().mapIndexedNotNull { index, instruction ->
+        if (instruction.opcode !in INVOKE_OPCODES) return@mapIndexedNotNull null
+        val reference = instruction.getReference<MethodReference>() ?: return@mapIndexedNotNull null
+        index to reference
+    }
+
+private val INVOKE_OPCODES =
+    setOf(
+        Opcode.INVOKE_VIRTUAL,
+        Opcode.INVOKE_VIRTUAL_RANGE,
+        Opcode.INVOKE_SUPER,
+        Opcode.INVOKE_SUPER_RANGE,
+        Opcode.INVOKE_DIRECT,
+        Opcode.INVOKE_DIRECT_RANGE,
+        Opcode.INVOKE_STATIC,
+        Opcode.INVOKE_STATIC_RANGE,
+        Opcode.INVOKE_INTERFACE,
+        Opcode.INVOKE_INTERFACE_RANGE,
+    )
+
+private fun Method.staticInvokeReferences(): List<Pair<Int, MethodReference>> =
+    codeInstructions().mapIndexedNotNull { index, instruction ->
+        if (instruction.opcode !in STATIC_INVOKE_OPCODES) return@mapIndexedNotNull null
+        val reference = instruction.getReference<MethodReference>() ?: return@mapIndexedNotNull null
+        index to reference
+    }
+
+private val STATIC_INVOKE_OPCODES = setOf(Opcode.INVOKE_STATIC, Opcode.INVOKE_STATIC_RANGE)
+
+private fun Method.hasInvoke(reference: (MethodReference) -> Boolean): Boolean =
+    invokeReferences().any { (_, candidate) -> reference(candidate) }
+
+internal fun hasObjectAndIntParameterShape(
+    parameterTypes: List<CharSequence>,
+    objectType: String? = null,
+): Boolean {
+    val descriptors = parameterTypes.map(CharSequence::toString)
+    // One Int, the callback object, and any auxiliary object parameters (12.41 appended a
+    // completion lambda); auxiliary primitives are not part of the contract.
+    return descriptors.size >= 2 &&
+        descriptors.count { it == "I" } == 1 &&
+        descriptors.all { it == "I" || it.startsWith("L") } &&
+        if (objectType == null) {
+            descriptors.any { it.startsWith("L") }
+        } else {
+            descriptors.count { it == objectType } == 1
+        }
+}
+
+/** The normal-dismiss fallback: the callback object plus auxiliary objects, no Int. */
+internal fun isLaunchRevealFallbackShape(parameterTypes: List<CharSequence>, callbackType: String): Boolean {
+    val descriptors = parameterTypes.map(CharSequence::toString)
+    return descriptors.firstOrNull() == callbackType &&
+        descriptors.none { it == "I" } &&
+        descriptors.all { it.startsWith("L") }
+}
+
+internal fun isLaunchRevealRenderer(method: Method): Boolean =
+    AccessFlags.STATIC.isSet(method.accessFlags) &&
+        method.returnType == "V" &&
+        hasObjectAndIntParameterShape(method.parameterTypes) &&
+        method.hasInvoke { reference ->
+            reference.definingClass == SURFACE_CONTROL_BUILDER_DESCRIPTOR &&
+                reference.name == "build" &&
+                reference.parameterTypes.isEmpty() &&
+                reference.returnType == "Landroid/view/SurfaceControl;"
+        } &&
+        method.hasInvoke { reference ->
+            reference.definingClass == ATTACHED_SURFACE_CONTROL_DESCRIPTOR &&
+                reference.name == "buildReparentTransaction" &&
+                reference.parameterTypes.map(CharSequence::toString) == listOf("Landroid/view/SurfaceControl;") &&
+                reference.returnType == "Landroid/view/SurfaceControl\$Transaction;"
+        }
+
+private object TwitterLaunchRevealRendererFingerprint : Fingerprint(
+    returnType = "V",
+    custom = { method, _ -> isLaunchRevealRenderer(method) },
+)
+
+private object TwitterLaunchRevealMarkerFingerprint : Fingerprint(
+    filters = listOf(string("LaunchReveal")),
+)
+
+private fun isLaunchRevealCallback(method: Method): Boolean {
+    if (AccessFlags.STATIC.isSet(method.accessFlags) || method.returnType != "V" || method.parameterTypes.size != 1) return false
+    val callbackParameter = method.parameterTypes.single().toString()
+    if (!callbackParameter.startsWith("L")) return false
+
+    val staticCalls = method.staticInvokeReferences().map { it.second }
+    val revealTargets =
+        staticCalls.filter { reference ->
+            hasObjectAndIntParameterShape(reference.parameterTypes, callbackParameter) &&
+                reference.returnType == "V"
+        }
+    val fallbackTargets =
+        staticCalls.filter { reference ->
+            isLaunchRevealFallbackShape(reference.parameterTypes, callbackParameter) &&
+                reference.returnType == "V"
+        }
+    if (revealTargets.size != 1 || fallbackTargets.size != 1) return false
+    if (revealTargets.single().definingClass != fallbackTargets.single().definingClass) return false
+
+    return true
+}
+
+private object TwitterLaunchRevealCallbackFingerprint : Fingerprint(
+    returnType = "V",
+    custom = { method, _ -> isLaunchRevealCallback(method) },
+)
+
+private fun MethodReference.descriptor(): String =
+    "$definingClass->$name(${parameterTypes.joinToString("")})$returnType"
+
+private fun Method.descriptor(): String =
+    "$definingClass->$name(${parameterTypes.joinToString("")})$returnType"
+
+private fun isNormalSplashDismiss(method: Method): Boolean {
+    val references = method.invokeReferences().map { it.second }
+    return references.any { it.definingClass == "Landroid/view/View;" && it.name == "animate" } &&
+        references.any { it.definingClass == "Landroid/view/ViewPropertyAnimator;" && it.name == "alpha" } &&
+        references.any { it.definingClass == "Landroid/view/ViewPropertyAnimator;" && it.name == "setDuration" } &&
+        references.any { it.definingClass == "Landroid/view/ViewPropertyAnimator;" && it.name == "withEndAction" }
+}
+
+context(context: BytecodePatchContext)
+private fun validateNormalSplashDismiss(reference: MethodReference) {
+    val owner =
+        context.classDefByOrNull(reference.definingClass)
+            ?: throw PatchException("NewX splash dismiss owner was not found: ${reference.definingClass}")
+    val method =
+        requireExactlyOne(
+            label = "NewX normal splash dismiss method",
+            candidates = owner.methods.filter { candidate ->
+                candidate.name == reference.name &&
+                    candidate.parameterTypes.map(CharSequence::toString) ==
+                        reference.parameterTypes.map(CharSequence::toString) &&
+                    candidate.returnType == reference.returnType
+            },
+            describe = { it.toString() },
+        )
+    if (!isNormalSplashDismiss(method)) {
+        throw PatchException("NewX splash fallback no longer performs the normal dismiss animation: $method")
+    }
+}
+
+private val restoreTwitterLaunchRevealPatch =
+    bytecodePatch(
+        name = "NewX: Restore Twitter splash transition",
+        description = "Skip the X launch reveal when Twitter branding is restored.",
+        default = false,
+    ) {
+        unsupportedOnMount(default = false)
+        compatibleWith(COMPATIBILITY_NEW_X)
+
+        execute {
+            val markerMethods = TwitterLaunchRevealMarkerFingerprint.scopedMatchAllOrNull().orEmpty()
+            val rendererMatches = TwitterLaunchRevealRendererFingerprint.scopedMatchAllOrNull().orEmpty()
+            val renderer =
+                resolveLaunchRevealRenderer(
+                    markerMethods.map { it.originalMethod },
+                    rendererMatches.map { it.originalMethod },
+                ) ?: return@execute
+            val rendererDescriptor = renderer.descriptor()
+
+            val callbacks =
+                TwitterLaunchRevealCallbackFingerprint.scopedMatchAllOrNull().orEmpty().filter { match ->
+                    match.method.invokeReferences().any { (_, reference) ->
+                        reference.descriptor() == rendererDescriptor
+                    }
+                }
+            val callback =
+                requireExactlyOne(
+                    label = "NewX launch reveal callback",
+                    candidates = callbacks,
+                    describe = { it.originalMethod.toString() },
+                )
+
+            val callbackMethod = callback.method
+            val callbackParameter = callbackMethod.parameterTypes.single().toString()
+            val fallbackCalls =
+                callbackMethod.staticInvokeReferences().filter { (_, reference) ->
+                    reference.definingClass == renderer.definingClass &&
+                        isLaunchRevealFallbackShape(reference.parameterTypes, callbackParameter) &&
+                        reference.returnType == "V"
+                }
+            val fallbackCall =
+                requireExactlyOne(
+                    label = "NewX normal splash dismiss call in ${callback.originalMethod}",
+                    candidates = fallbackCalls,
+                    describe = { "instruction ${it.first}: ${it.second.descriptor()}" },
+                )
+            validateNormalSplashDismiss(fallbackCall.second)
+
+            // The app already routes to the normal dismiss when the reveal is unavailable (API < 33,
+            // reduced motion, animations off). Force that arm by zeroing the SDK value at its gate
+            // instead of re-creating the fallback's arguments, which gain lambdas across releases.
+            val instructions = callbackMethod.instructions.toList()
+            val sdkGates =
+                instructions.mapIndexedNotNull { index, instruction ->
+                    if (instruction.opcode != Opcode.SGET) return@mapIndexedNotNull null
+                    if (instruction.getReference<FieldReference>()?.toString() != SDK_INT_FIELD) {
+                        return@mapIndexedNotNull null
+                    }
+                    val sdkRegister = (instruction as OneRegisterInstruction).registerA
+                    val gate =
+                        (index + 1 until minOf(index + 6, instructions.size)).firstOrNull { candidate ->
+                            val next = instructions[candidate]
+                            next.opcode == Opcode.IF_LT && (next as TwoRegisterInstruction).registerA == sdkRegister
+                        } ?: return@mapIndexedNotNull null
+                    val branch = instructions[gate] as? BuilderOffsetInstruction ?: return@mapIndexedNotNull null
+                    val target = branch.target.location.index
+                    val fallbackIndex =
+                        (target until instructions.size).firstOrNull { candidate ->
+                            instructions[candidate].getReference<MethodReference>()?.toString() ==
+                                fallbackCall.second.toString()
+                        } ?: return@mapIndexedNotNull null
+                    // The forced arm must not read the zeroed register before redefining it.
+                    val written = mutableSetOf<Int>()
+                    for (cursor in target until fallbackIndex) {
+                        val arm = instructions[cursor]
+                        val destination = if (arm.opcode.setsRegister()) (arm as? OneRegisterInstruction)?.registerA
+                            ?: (arm as? TwoRegisterInstruction)?.registerA
+                            ?: (arm as? ThreeRegisterInstruction)?.registerA else null
+                        val reads = arm.registersUsed.filter { it != destination || arm.opcode in INVOKE_OPCODES }
+                        if (sdkRegister in reads && sdkRegister !in written) return@mapIndexedNotNull null
+                        if (destination != null) written += destination
+                    }
+                    if (sdkRegister in instructions[fallbackIndex].registersUsed && sdkRegister !in written) {
+                        return@mapIndexedNotNull null
+                    }
+                    gate to sdkRegister
+                }
+            val (gateIndex, sdkRegister) =
+                requireExactlyOne(
+                    label = "NewX launch reveal SDK gate in ${callback.originalMethod}",
+                    candidates = sdkGates,
+                    describe = { "if-lt at ${it.first} on v${it.second}" },
+                )
+
+            // Relocate old-entry branches so none can bypass the forced value.
+            callbackMethod.insertHook(index = gateIndex, relocateBranchTargets = true) {
+                constInt(sdkRegister, 0)
+            }
+        }
+    }
 
 @Suppress("unused")
 val bringBackTwitterPatch =
@@ -31,7 +317,7 @@ val bringBackTwitterPatch =
         unsupportedOnMount(default = false)
         compatibleWith(COMPATIBILITY_NEW_X)
 
-        dependsOn(addResourcesPatch, restoreTwitterTopBarLogoPatch)
+        dependsOn(addResourcesPatch, restoreTwitterLaunchRevealPatch)
 
         execute {
             val hasPullToRefreshLogo = get("res/raw/x_refresh_logo.json").exists()

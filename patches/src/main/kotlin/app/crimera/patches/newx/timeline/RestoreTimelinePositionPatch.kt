@@ -15,13 +15,13 @@ import app.crimera.bytecode.methodReference
 import app.crimera.patches.common.classDefFlatMap
 import app.crimera.patches.common.isAssignableTo
 import app.crimera.patches.common.requireExactlyOne
-import app.crimera.patches.common.requireAtMostOne
 import app.crimera.patches.common.scopedMatchAll
 import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.extensions.InstructionExtensions.instructions
 import app.morphe.patcher.extensions.InstructionExtensions.removeInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.fieldAccess
+import app.morphe.patcher.InstructionLocation.MatchAfterImmediately
 import app.morphe.patcher.methodCall
 import app.morphe.patcher.opcode
 import app.morphe.patcher.patch.PatchException
@@ -79,6 +79,9 @@ private const val PENDING_ANCHOR_SORT_INDEX_DESCRIPTOR =
     "$TIMELINE_POSITION_STORE_DESCRIPTOR->pendingAnchorSortIndex(${ENUM_DESCRIPTOR}${STRING_DESCRIPTOR}J)J"
 private const val CONSUME_ANCHOR_DESCRIPTOR =
     "$TIMELINE_POSITION_STORE_DESCRIPTOR->consumeAnchor(${ENUM_DESCRIPTOR}${STRING_DESCRIPTOR}JI)[I"
+private const val RECORD_ANCHOR_SEARCH_DESCRIPTOR =
+    "$TIMELINE_POSITION_STORE_DESCRIPTOR->recordAnchorSearch(IJZ)V"
+private const val STRING_EQUALS_DESCRIPTOR = "$STRING_DESCRIPTOR->equals($OBJECT_DESCRIPTOR)Z"
 private const val SETTING_READ_DESCRIPTOR =
     "$SETTINGS_REGISTRY_DESCRIPTOR->getBooleanOrDefault($STRING_DESCRIPTOR)Z"
 
@@ -127,23 +130,36 @@ private const val SAVE_ANCHOR_NULL_LABEL = "piko_newx_save_anchor_null"
 private const val SAVE_ANCHOR_RETURN_LABEL = "piko_newx_save_anchor_return"
 private const val RESTORE_ANCHOR_NULL_LABEL = "piko_newx_restore_anchor_null"
 private const val RESTORE_ANCHOR_LOOP_LABEL = "piko_newx_restore_anchor_loop"
+private const val RESTORE_ANCHOR_ID_SEARCH_LABEL = "piko_newx_restore_anchor_id_search"
+private const val RESTORE_ANCHOR_ID_LOOP_LABEL = "piko_newx_restore_anchor_id_loop"
+private const val RESTORE_ANCHOR_ID_FOUND_LABEL = "piko_newx_restore_anchor_id_found"
+private const val RESTORE_ANCHOR_EXACT_LABEL = "piko_newx_restore_anchor_exact"
 private const val RESTORE_ANCHOR_NOT_FOUND_LABEL = "piko_newx_restore_anchor_not_found"
 private const val RESTORE_ANCHOR_CONSUME_LABEL = "piko_newx_restore_anchor_consume"
-private const val RESTORE_ANCHOR_GONE_LABEL = "piko_newx_restore_anchor_gone"
-
-private val SUPPORTED_TIMELINE_POSITION_VERSIONS = setOf("12.34.0-prod.01", "12.35.0-prod.01")
-private val COMPATIBILITY_TIMELINE_POSITION =
-    COMPATIBILITY_NEW_X.excluding(
-        *COMPATIBILITY_NEW_X.targets
-            .filterNot { target -> target.version in SUPPORTED_TIMELINE_POSITION_VERSIONS }
-            .map { target -> target.version }
-            .toTypedArray(),
-    )
 
 private object NewXUserIdentifierSerializerFingerprint : Fingerprint(
     definingClass = "Lcom/x/models/",
     name = "<clinit>",
     strings = listOf("com.x.models.UserIdentifier"),
+)
+
+// X trims the persisted home timeline to its newest N entries on startup when this server switch is
+// positive, which drops any saved position below N before the restore runs.
+private const val HOME_START_TRIM_SWITCH = "android_xlite_home_timeline_start_trim_entries_to_keep"
+
+private object NewXHomeStartTrimFingerprint : Fingerprint(
+    definingClass = "Lcom/x/repositories/urt/",
+    filters =
+        listOf(
+            string(HOME_START_TRIM_SWITCH),
+            methodCall(
+                opcode = Opcode.INVOKE_INTERFACE,
+                name = "getInt",
+                parameters = listOf(STRING_DESCRIPTOR, "I"),
+                returnType = "I",
+            ),
+            opcode(Opcode.MOVE_RESULT, MatchAfterImmediately()),
+        ),
 )
 
 private object NewXScrollPositionHolderFingerprint : Fingerprint(
@@ -253,7 +269,7 @@ val restoreTimelinePositionPatch =
         description = "Persists supported timeline positions, then restores them after the app process restarts.",
     ) {
         unsupportedOnMount()
-        compatibleWith(COMPATIBILITY_TIMELINE_POSITION)
+        compatibleWith(COMPATIBILITY_NEW_X)
 
         val restoreTimelinePosition =
             newXToggle(
@@ -274,6 +290,33 @@ val restoreTimelinePositionPatch =
         )
 
         execute {
+            // A non-positive entries-to-keep makes X skip the startup trim entirely.
+            val homeStartTrimMatch =
+                requireExactlyOne(
+                    "NewX home timeline start-trim switch read",
+                    NewXHomeStartTrimFingerprint.scopedMatchAll(),
+                )
+            val trimResultMatch = homeStartTrimMatch.instructionMatches.last()
+            val trimResultRegister =
+                (trimResultMatch.instruction as? OneRegisterInstruction)?.registerA
+                    ?: throw PatchException("NewX home timeline start-trim result has no register layout")
+            homeStartTrimMatch.method.apply {
+                val trimRead =
+                    restoreTimelinePosition.injectRead(
+                        method = this,
+                        index = trimResultMatch.index + 1,
+                        excludedRegisters = listOf(trimResultRegister),
+                    )
+                insertHook(
+                    index = trimRead.nextIndex,
+                    // Only the switch value changes; the branch that consumes it keeps its labels.
+                    relocateBranchTargets = false,
+                ) {
+                    ifEqz(trimRead.register, Target.Original)
+                    constInt(trimResultRegister, 0)
+                }
+            }
+
             val userIdentifierSerializerMatch =
                 requireExactlyOne(
                     "NewX UserIdentifier serializer class",
@@ -954,56 +997,19 @@ val restoreTimelinePositionPatch =
             val resumeSortIndexFieldReference =
                 fieldReference("$resumePositionDescriptor->${resumeSortIndexField.name}:J")
 
-            val factoryMethodCandidates =
-                saveMethod.instructions.withIndex().filter { indexedInstruction ->
-                    if (indexedInstruction.value.opcode != Opcode.INVOKE_STATIC &&
-                        indexedInstruction.value.opcode != Opcode.INVOKE_STATIC_RANGE
-                    ) {
-                        return@filter false
-                    }
-                    val reference = indexedInstruction.value.getReference<MethodReference>()
-                        ?: return@filter false
-                    reference.parameterTypes.map(CharSequence::toString) ==
-                        listOf(
-                            successItemsField.type,
-                            ARRAY_LIST_DESCRIPTOR,
-                            holderDescriptor,
-                            INSTANT_DESCRIPTOR,
-                        ) && reference.returnType == resumePositionDescriptor
-                }
-            val factoryCall = requireAtMostOne("NewX timeline resume-position factory call", factoryMethodCandidates)
-            val (factoryReference, clockNowReference) = if (factoryCall != null) {
-                val reference = factoryCall.value.getReference<MethodReference>()
-                    ?: throw PatchException("NewX timeline resume-position factory has no method reference")
-                val arguments = factoryCall.value.invokeArgumentRegisters()
-                if (arguments.size != 4) {
-                    throw PatchException("NewX timeline resume-position factory has unexpected argument registers: $arguments")
-                }
-                val result = saveMethod.instructions.getOrNull(factoryCall.index - 1)
-                if (result?.opcode != Opcode.MOVE_RESULT_OBJECT ||
-                    (result as? OneRegisterInstruction)?.registerA != arguments[3]
-                ) throw PatchException("NewX timeline resume-position factory's Instant argument is not the preceding invoke result")
-                val clockInstruction = saveMethod.instructions.getOrNull(factoryCall.index - 2)
-                val clock = clockInstruction?.getReference<MethodReference>()
-                    ?: throw PatchException("NewX timeline clock now() call was not found before the factory")
-                if (clockInstruction.opcode != Opcode.INVOKE_INTERFACE || clock.name != "now" ||
-                    clock.parameterTypes.isNotEmpty() || clock.returnType != INSTANT_DESCRIPTOR
-                ) throw PatchException("Unexpected NewX timeline clock now() call: $clock")
-                reference to clock
-            } else {
-                val extracted = resolveInlineResumePositionFactory(
-                    saveMethod,
-                    listOf(successItemsField.type, ARRAY_LIST_DESCRIPTOR, holderDescriptor, INSTANT_DESCRIPTOR),
-                    resumePositionDescriptor,
-                    successItemsField,
-                    saveHolderRegister,
-                )
-                if (componentClass.methods.any { it.name == extracted.method.name }) {
-                    throw PatchException("NewX timeline component already has ${extracted.method.name}")
-                }
-                componentClass.methods.add(extracted.method)
-                extracted.method to extracted.clock
+            val extracted = resolveInlineResumePositionFactory(
+                saveMethod,
+                listOf(successItemsField.type, ARRAY_LIST_DESCRIPTOR, holderDescriptor, INSTANT_DESCRIPTOR),
+                resumePositionDescriptor,
+                successItemsField,
+                saveHolderRegister,
+            )
+            if (componentClass.methods.any { it.name == extracted.method.name }) {
+                throw PatchException("NewX timeline component already has ${extracted.method.name}")
             }
+            componentClass.methods.add(extracted.method)
+            val factoryReference = extracted.method
+            val clockNowReference = extracted.clock
             val clockFieldDefinition =
                 requireExactlyOne(
                     "NewX timeline clock field definition",
@@ -1503,7 +1509,7 @@ val restoreTimelinePositionPatch =
             if (classDefByOrNull(itemDescriptor)?.accessFlags?.let(AccessFlags.INTERFACE::isSet) != true) {
                 throw PatchException("NewX TimelineItem matcher no longer takes an interface: $matcherReference")
             }
-            requireExactlyOne(
+            val matcherMethod = requireExactlyOne(
                 "NewX TimelineItem matcher method definition",
                 mutableClassDefBy(matcherReference.definingClass).methods.filter { method ->
                     AccessFlags.STATIC.isSet(method.accessFlags) &&
@@ -1513,6 +1519,25 @@ val restoreTimelinePositionPatch =
                         method.returnType == "Z"
                 },
             )
+            // The matcher compares the item's entry id and sort index. Its two getters are reused for
+            // the entry-id-only fallback, which finds a row whose sort index changed across a reload.
+            val matcherItemGetters =
+                matcherMethod.instructions.mapNotNull { instruction ->
+                    if (instruction.opcode != Opcode.INVOKE_INTERFACE) return@mapNotNull null
+                    instruction.getReference<MethodReference>()?.takeIf { reference ->
+                        reference.definingClass == itemDescriptor && reference.parameterTypes.isEmpty()
+                    }
+                }
+            val itemEntryIdGetter =
+                requireExactlyOne(
+                    "NewX TimelineItem entry-id getter",
+                    matcherItemGetters.filter { it.returnType == STRING_DESCRIPTOR },
+                )
+            val itemSortIndexGetter =
+                requireExactlyOne(
+                    "NewX TimelineItem sort-index getter",
+                    matcherItemGetters.filter { it.returnType == "J" },
+                )
 
             val eventHolderLoad =
                 requireExactlyOne(
@@ -1821,20 +1846,44 @@ val restoreTimelinePositionPatch =
                 moveResult(10, "I")
                 constInt(9, 0)
                 label(RESTORE_ANCHOR_LOOP_LABEL)
-                ifGe(9, 10, Target.Local(RESTORE_ANCHOR_NOT_FOUND_LABEL))
+                ifGe(9, 10, Target.Local(RESTORE_ANCHOR_ID_SEARCH_LABEL))
                 invokeInterface(methodReference("$LIST_DESCRIPTOR->get(I)$OBJECT_DESCRIPTOR"), 6, 9)
                 moveResult(11, OBJECT_DESCRIPTOR)
                 checkCast(11, itemDescriptor)
                 invokeStatic(matcherReference, 11, 4, 7, 8)
                 moveResult(12, "Z")
-                ifNez(12, Target.Local(RESTORE_ANCHOR_CONSUME_LABEL))
+                ifNez(12, Target.Local(RESTORE_ANCHOR_EXACT_LABEL))
                 intAddLiteral8(9, 9, 1)
                 goto(Target.Local(RESTORE_ANCHOR_LOOP_LABEL))
+                // A reloaded timeline can carry the same entry under a new sort index. Match the entry id
+                // alone and stage the row's current sort index, since the scroll key needs both.
+                label(RESTORE_ANCHOR_ID_SEARCH_LABEL)
+                constInt(9, 0)
+                label(RESTORE_ANCHOR_ID_LOOP_LABEL)
+                ifGe(9, 10, Target.Local(RESTORE_ANCHOR_NOT_FOUND_LABEL))
+                invokeInterface(methodReference("$LIST_DESCRIPTOR->get(I)$OBJECT_DESCRIPTOR"), 6, 9)
+                moveResult(11, OBJECT_DESCRIPTOR)
+                checkCast(11, itemDescriptor)
+                invokeInterface(itemEntryIdGetter, 11)
+                moveResult(12, STRING_DESCRIPTOR)
+                invokeVirtual(methodReference(STRING_EQUALS_DESCRIPTOR), 4, 12)
+                moveResult(12, "Z")
+                ifNez(12, Target.Local(RESTORE_ANCHOR_ID_FOUND_LABEL))
+                intAddLiteral8(9, 9, 1)
+                goto(Target.Local(RESTORE_ANCHOR_ID_LOOP_LABEL))
+                label(RESTORE_ANCHOR_ID_FOUND_LABEL)
+                invokeInterface(itemSortIndexGetter, 11)
+                moveResult(7, "J")
+                constInt(12, 0)
+                goto(Target.Local(RESTORE_ANCHOR_CONSUME_LABEL))
                 label(RESTORE_ANCHOR_NOT_FOUND_LABEL)
                 constInt(9, -1)
-                goto(Target.Local(RESTORE_ANCHOR_GONE_LABEL))
+                constInt(12, 0)
+                goto(Target.Local(RESTORE_ANCHOR_CONSUME_LABEL))
+                label(RESTORE_ANCHOR_EXACT_LABEL)
+                constInt(12, 1)
                 label(RESTORE_ANCHOR_CONSUME_LABEL)
-                label(RESTORE_ANCHOR_GONE_LABEL)
+                invokeStatic(methodReference(RECORD_ANCHOR_SEARCH_DESCRIPTOR), 10, 7, 8, 12)
                 invokeStatic(
                     methodReference(CONSUME_ANCHOR_DESCRIPTOR),
                     0,

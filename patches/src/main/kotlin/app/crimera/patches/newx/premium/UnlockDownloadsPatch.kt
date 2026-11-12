@@ -7,7 +7,6 @@ import app.crimera.patches.common.requireAtMostOne
 import app.crimera.patches.common.OBJECT_MOVE_OPCODES
 import app.crimera.patches.common.INTEGER_MOVE_OPCODES
 import app.crimera.patches.common.scopedMatchAll
-import app.crimera.patches.common.scopedMatchAllOrNull
 import app.morphe.patcher.Match
 import app.morphe.patcher.extensions.InstructionExtensions.instructions
 import app.morphe.patcher.patch.PatchException
@@ -34,8 +33,7 @@ private fun Method.subscriptionCalls(): List<Int> =
     implementation!!.instructions.toList().mapIndexedNotNull { index, instruction ->
         val reference = instruction.getReference<MethodReference>()
         index.takeIf {
-            instruction.opcode.toString().startsWith("INVOKE_") &&
-                reference?.definingClass?.startsWith("Lcom/x/subscriptions/") == true &&
+            reference?.definingClass?.startsWith("Lcom/x/subscriptions/") == true &&
                 reference.returnType == "Z"
         }
     }
@@ -89,7 +87,8 @@ private class DownloadFlow(
     fun successors(index: Int): List<Int> {
         val instruction = instructions[index]
         val opcode = instruction.opcode
-        if (opcode.toString().startsWith("RETURN") || opcode == Opcode.THROW || instruction is SwitchPayload) return emptyList()
+        if (opcode.format.isPayloadFormat) return emptyList()
+        if (!opcode.canContinue() && instruction !is OffsetInstruction) return emptyList()
         if (opcode in setOf(Opcode.GOTO, Opcode.GOTO_16, Opcode.GOTO_32)) return listOf(target(index))
         if (opcode == Opcode.PACKED_SWITCH || opcode == Opcode.SPARSE_SWITCH) {
             val payload = instructions[target(index)] as SwitchPayload
@@ -97,7 +96,8 @@ private class DownloadFlow(
                 indexes.getValue(offsets[index] + element.offset)
             } + (index + 1)
         }
-        if (opcode.toString().startsWith("IF_")) return listOf(target(index), index + 1)
+        if (opcode.format in setOf(com.android.tools.smali.dexlib2.Format.Format21t,
+                com.android.tools.smali.dexlib2.Format.Format22t)) return listOf(target(index), index + 1)
         return listOf(index + 1).filter { it < instructions.size }
     }
 
@@ -202,13 +202,29 @@ private class DownloadFlow(
                 selected = true
                 val payload = instructions[target(index)] as SwitchPayload
                 val cases = payload.switchElements.filter { it.key == value }
-                val case = requireExactlyOne("NewX captured coroutine dispatch $method selector=$value", cases)
-                pending.add(indexes.getValue(offsets[index] + case.offset))
+                // R8 may fold the highest-numbered case into the switch's fall-through default arm,
+                // so an absent key selects the default path (a key outside the payload is by
+                // definition handled there). Duplicate keys remain a hard failure.
+                val case = requireAtMostOne("NewX captured coroutine dispatch $method selector=$value", cases)
+                pending.add(if (case != null) indexes.getValue(offsets[index] + case.offset) else index + 1)
                 continue
             }
             pending.addAll(successors(index))
         }
-        if (!selected) throw PatchException("No captured discriminator dispatch in NewX coroutine $method")
+        if (!selected) {
+            val switches = instructions.indices.filter {
+                instructions[it].opcode in setOf(Opcode.PACKED_SWITCH, Opcode.SPARSE_SWITCH)
+            }.joinToString { index ->
+                val register = (instructions[index] as OneRegisterInstruction).registerA
+                val field = fieldOrigin(index, register)
+                "index=$index reg=v$register origin=${origin(index, register)} field=${field?.second} " +
+                    "receiver=${field?.let { readsReceiver(it.first) }}"
+            }
+            throw PatchException(
+                "No captured discriminator dispatch in NewX coroutine $method " +
+                    "(expected=$field selector=$value receiver=v$receiver switches=[$switches])",
+            )
+        }
         // Origin queries after selection must not pick definitions from another merged case.
         selectedReachable = visited
         return visited
@@ -254,7 +270,7 @@ private fun Method.delegatesToOfflinePolicy(offlinePremium: MethodReference, cla
     val delegates = flow.instructions.indices.filter { index ->
         val instruction = flow.instructions[index]
         val reference = instruction.getReference<MethodReference>() ?: return@filter false
-        if (!instruction.opcode.toString().startsWith("INVOKE_VIRTUAL") || reference.returnType == "V") return@filter false
+        if (instruction.opcode !in setOf(Opcode.INVOKE_VIRTUAL, Opcode.INVOKE_VIRTUAL_RANGE) || reference.returnType == "V") return@filter false
         val receiver = instruction.registersUsed[0]
         val field = flow.fieldOrigin(index, receiver) ?: return@filter false
         if (!flow.readsReceiver(field.first)) return@filter false
@@ -278,7 +294,7 @@ private fun Method.hasTimelineOfflinePolicy(
     val policies = flow.proofIndexes.filter { index ->
         val instruction = flow.instructions[index]
         val reference = instruction.getReference<MethodReference>() ?: return@filter false
-        if (!instruction.opcode.toString().startsWith("INVOKE_VIRTUAL") || reference.returnType != "Ljava/lang/Enum;" ||
+        if (instruction.opcode !in setOf(Opcode.INVOKE_VIRTUAL, Opcode.INVOKE_VIRTUAL_RANGE) || reference.returnType != "Ljava/lang/Enum;" ||
             reference.parameterTypes.map(CharSequence::toString) != listOf("Ljava/lang/String;", "Lkotlin/coroutines/jvm/internal/ContinuationImpl;")
         ) return@filter false
         val field = flow.fieldOrigin(index, instruction.registersUsed[0]) ?: return@filter false
@@ -330,7 +346,7 @@ private fun proveDownstreamOfflinePremium(
     ) throw PatchException("NewX offline coroutine receiver is not its allocated instance in $handler")
     requireExactlyOne("NewX offline coroutine launch in $handler", (constructorIndex + 1 until ordinaryEvent).filter { index ->
         val reference = instructions[index].getReference<MethodReference>() ?: return@filter false
-        if (!instructions[index].opcode.toString().startsWith("INVOKE_STATIC") ||
+        if (instructions[index].opcode !in setOf(Opcode.INVOKE_STATIC, Opcode.INVOKE_STATIC_RANGE) ||
             !reference.definingClass.startsWith("Lkotlinx/coroutines/")
         ) return@filter false
         val functionParameters = reference.parameterTypes.withIndex().filter { it.value.toString() == "Lkotlin/jvm/functions/Function2;" }
@@ -399,20 +415,24 @@ private fun proveDownstreamOfflinePremium(
     val dispatchFlow = DownloadFlow(dispatch, selectedDispatchOnly = true)
     val helpers = dispatchFlow.selectedDispatch(discriminator, selector).mapNotNull { index ->
         val reference = dispatchFlow.instructions[index].getReference<MethodReference>() ?: return@mapNotNull null
-        if (!dispatchFlow.instructions[index].opcode.toString().startsWith("INVOKE_DIRECT") ||
+        if (dispatchFlow.instructions[index].opcode !in setOf(Opcode.INVOKE_DIRECT, Opcode.INVOKE_DIRECT_RANGE) ||
             reference.definingClass != coroutine.type || reference.name == "<init>" ||
             dispatchFlow.origin(index, dispatchFlow.instructions[index].registersUsed[0]) != -dispatchFlow.receiver - 1
         ) return@mapNotNull null
         downloadMethod(reference, classByType)
     }.distinctBy { it.toString() }
-    val helperFlows = helpers.map { DownloadFlow(it) } + if (hostField != null) listOf(dispatchFlow) else emptyList()
+    // Newer coroutine lowering can keep the host policy call in invokeSuspend itself instead of
+    // extracting it to a private helper. Inspect that selected dispatcher on both video and
+    // timeline paths; the selector-restricted flow prevents unrelated merged cases from matching.
+    val helperFlows = (helpers.map { DownloadFlow(it) } + dispatchFlow)
+        .distinctBy { it.method.toString() }
     val policyPaths = helperFlows.filter { helperFlow ->
         val helper = helperFlow.method
         if (helper.subscriptionCalls().any { it in helperFlow.proofIndexes }) throw PatchException("Unexpected subscription gate in NewX offline coroutine $helper")
         val calls = helperFlow.proofIndexes.filter { index ->
             val instruction = helperFlow.instructions[index]
             val reference = instruction.getReference<MethodReference>() ?: return@filter false
-            if (hostField != null && instruction.opcode.toString().startsWith("INVOKE_STATIC") &&
+            if (hostField != null && instruction.opcode in setOf(Opcode.INVOKE_STATIC, Opcode.INVOKE_STATIC_RANGE) &&
                 reference.definingClass == hostType && reference.parameterTypes.firstOrNull()?.toString() == hostType &&
                 reference.returnType == "Ljava/lang/Object;" &&
                 reference.parameterTypes.lastOrNull()?.toString() == "Lkotlin/coroutines/jvm/internal/ContinuationImpl;"
@@ -421,7 +441,7 @@ private fun proveDownstreamOfflinePremium(
                 return@filter host.second.toString() == captureField.toString() && helperFlow.readsReceiver(host.first) &&
                     downloadMethod(reference, classByType).hasTimelineOfflinePolicy(hostType, offlinePremium, classByType)
             }
-            if (!instruction.opcode.toString().startsWith("INVOKE_VIRTUAL") || reference.returnType != "Ljava/lang/Enum;" ||
+            if (instruction.opcode !in setOf(Opcode.INVOKE_VIRTUAL, Opcode.INVOKE_VIRTUAL_RANGE) || reference.returnType != "Ljava/lang/Enum;" ||
                 reference.parameterTypes.map(CharSequence::toString) != listOf("Ljava/lang/String;", "Lkotlin/coroutines/jvm/internal/ContinuationImpl;")
             ) return@filter false
             val policyField = helperFlow.fieldOrigin(index, instruction.registersUsed[0]) ?: return@filter false
@@ -597,18 +617,6 @@ private fun requireMatches(
     )
 }
 
-private fun requireMatches(
-    label: String,
-    matches: Collection<Match>,
-    expectedCounts: IntRange,
-): Collection<Match> {
-    if (matches.size in expectedCounts) return matches
-    throw PatchException(
-        "Expected ${expectedCounts.first}..${expectedCounts.last} $label matches, " +
-            "found ${matches.size}: " + matches.joinToString { it.originalMethod.toString() },
-    )
-}
-
 @Suppress("unused")
 val newXDownloadPatch =
     bytecodePatch(
@@ -630,23 +638,17 @@ val newXDownloadPatch =
                 "NewX offline-video feature gate",
                 SubscriptionsFeaturesOfflineVideoEnabledFingerprint.scopedMatchAll(),
             )
-            val videoDownloadMatches =
-                NewXVideoTabDownloadHandlerFingerprint.scopedMatchAllOrNull().orEmpty()
-            val videoPlans = if (videoDownloadMatches.isNotEmpty()) {
-                requireMatches(
-                    "NewX video download handler",
-                    videoDownloadMatches,
-                    expectedCounts = 1..2,
-                ).map { match ->
-                    match.method to resolveVideoDownloadSubscriptionResults(
-                        match.method,
-                        premium.originalMethod,
-                        offlinePremium.originalMethod,
-                        offlineFeature.originalMethod,
-                        { descriptor -> classDefByOrNull(descriptor) },
-                    )
-                }
-            } else emptyList()
+            val videoHandler = requireExactlyOne(
+                "NewX video download handler",
+                NewXVideoTabDownloadHandlerFingerprint.scopedMatchAll(),
+            )
+            val videoResults = resolveVideoDownloadSubscriptionResults(
+                videoHandler.method,
+                premium.originalMethod,
+                offlinePremium.originalMethod,
+                offlineFeature.originalMethod,
+                { descriptor -> classDefByOrNull(descriptor) },
+            )
 
             val timelineHandler = requireExactlyOne(
                 "NewX timeline download handler",
@@ -660,7 +662,7 @@ val newXDownloadPatch =
                 { descriptor -> classDefByOrNull(descriptor) },
             )
 
-            videoPlans.forEach { (method, results) -> method.forceSubscriptionFeatureResults(results) }
+            videoHandler.method.forceSubscriptionFeatureResults(videoResults)
             timelineHandler.method.forceSubscriptionFeatureResults(timelineResults)
             listOf(premium, offlinePremium, offlineFeature).forEach(::forceBooleanResult)
 

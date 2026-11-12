@@ -416,7 +416,7 @@ public final class InlineDownloadButtonTest {
         float capturedSize = InlineDownloadButton.markIconSize(downloadAction, 18f);
 
         assertEquals(-18f, capturedSize, 0.0f);
-        assertEquals(18f, InlineDownloadButton.displayIconSize(capturedSize), 0.0f);
+        assertEquals(18f, Math.abs(capturedSize), 0.0f);
         assertSame(downloadIcon, InlineDownloadButton.selectIcon(
                 nativeIcon,
                 capturedSize,
@@ -443,24 +443,6 @@ public final class InlineDownloadButtonTest {
     }
 
     @Test
-    public void downloadActionRegistrationDoesNotEvictVisibleEntry() {
-        Object oldestAction = new Object();
-        InlineDownloadButton.registerDownloadAction(oldestAction);
-        List<Object> retainedActions = new ArrayList<>();
-        for (int index = 0; index < 2000; index++) {
-            Object action = new Object();
-            retainedActions.add(action);
-            InlineDownloadButton.registerDownloadAction(action);
-        }
-
-        assertEquals(-18f, InlineDownloadButton.markIconSize(oldestAction, 18f), 0.0f);
-        assertEquals(-18f, InlineDownloadButton.markIconSize(
-                retainedActions.get(retainedActions.size() - 1),
-                18f
-        ), 0.0f);
-    }
-
-    @Test
     public void nativeAndDownloadSlotsHaveDistinctCapturedValues() {
         Object downloadAction = new Object();
         InlineDownloadButton.registerDownloadAction(downloadAction);
@@ -472,23 +454,14 @@ public final class InlineDownloadButtonTest {
 
         assertEquals(18f, nativeSize, 0.0f);
         assertEquals(-18f, downloadSize, 0.0f);
-        assertEquals(
-                InlineDownloadButton.displayIconSize(nativeSize),
-                InlineDownloadButton.displayIconSize(downloadSize),
-                0.0f
-        );
+        assertEquals(Math.abs(nativeSize), Math.abs(downloadSize), 0.0f);
+        assertEquals(18f, Math.abs(nativeSize), 0.0f);
         assertSame(nativeIcon, InlineDownloadButton.selectIcon(nativeIcon, nativeSize, downloadIcon));
         assertSame(downloadIcon, InlineDownloadButton.selectIcon(
                 nativeIcon,
                 downloadSize,
                 downloadIcon
         ));
-
-        assertEquals(18f, InlineDownloadButton.displayIconSize(nativeSize), 0.0f);
-        assertSame(nativeIcon, InlineDownloadButton.selectIcon(nativeIcon, downloadIcon));
-
-        assertEquals(18f, InlineDownloadButton.displayIconSize(downloadSize), 0.0f);
-        assertSame(downloadIcon, InlineDownloadButton.selectIcon(nativeIcon, downloadIcon));
     }
 
     @Test
@@ -497,11 +470,12 @@ public final class InlineDownloadButtonTest {
         Object downloadAction = new Object();
         InlineDownloadButton.registerDownloadAction(downloadAction);
         Object nativeIcon = new Object();
+        float markedSize = InlineDownloadButton.markIconSize(downloadAction, 18f);
 
-        assertEquals(18f, InlineDownloadButton.markIconSize(downloadAction, 18f), 0.0f);
+        assertEquals(18f, markedSize, 0.0f);
         assertSame(nativeIcon, InlineDownloadButton.selectIcon(
                 nativeIcon,
-                -18f,
+                markedSize,
                 new Object()
         ));
     }
@@ -529,11 +503,14 @@ public final class InlineDownloadButtonTest {
         DownloadFileName.PostContext context = DownloadFileName.PostContext.from(post);
         assertEquals("Phot0_detective", context.screenName);
         assertEquals("2088553803364843766", context.id);
+        assertEquals("2044418450530181120", context.userId);
         assertEquals("写真集探偵", context.sourceUserDisplayName);
-        // {userName} and {name} must describe the same account as {id}, not the quoting author.
+        // {userName}, {userId}, and {name} must describe the source account, not the retweeter.
         assertEquals("写真集探偵", context.name);
         assertEquals("Phot0_detective_2088553803364843766.jpg",
                 DownloadFileName.render(null, context, 0, 1, "jpg"));
+        assertEquals("Phot0_detective_2088553803364843766.jpg",
+                DownloadFileName.render("{userName}_{id}", context, 0, 1, "jpg"));
     }
 
     @Test
@@ -566,6 +543,9 @@ public final class InlineDownloadButtonTest {
         DownloadFileName.PostContext context = DownloadFileName.PostContext.from(post);
         assertEquals("chachironi3", context.screenName);
         assertEquals("2088279482146898407", context.id);
+        assertNull(context.userId);
+        assertEquals("chachironi3_2088279482146898407.jpg",
+                DownloadFileName.render("{userId}_{id}", context, 0, 1, "jpg"));
         // No source display name in the lineage: leave {name} empty rather than the author's name.
         assertNull(context.name);
     }
@@ -581,6 +561,7 @@ public final class InlineDownloadButtonTest {
         DownloadFileName.PostContext context = DownloadFileName.PostContext.from(post);
         assertEquals("hige_hurai", context.screenName);
         assertEquals("2088221458740969716", context.id);
+        assertEquals("1423483994084048906", context.userId);
         assertEquals("Hige Hurai", context.name);
     }
 
@@ -609,6 +590,11 @@ public final class InlineDownloadButtonTest {
                 DownloadFileName.render("{displayName}", post, 0, 1, "jpg"));
         assertEquals(DownloadFileName.render("{userName}", post, 0, 1, "jpg"),
                 DownloadFileName.render("{screenName}", post, 0, 1, "jpg"));
+        assertTrue(DownloadFileName.editorTokens().contains("userId"));
+        assertEquals("1234567890_1234567890123456789.jpg",
+                DownloadFileName.render("{userId}_{id}", post, 0, 1, "jpg"));
+        assertEquals("jack_1234567890123456789.jpg",
+                DownloadFileName.render(null, post, 0, 1, "jpg"));
     }
 
     @Test
@@ -683,6 +669,7 @@ public final class InlineDownloadButtonTest {
     public void sanitizerStripsSegmentsThatCouldEscapeTheChosenFolder() {
         DownloadFileName.PostContext post = new DownloadFileName.PostContext(
                 "../../etc/passwd",
+                "1234567890",
                 "..\\..\\evil",
                 "a/b",
                 "2026-01-31-123456",

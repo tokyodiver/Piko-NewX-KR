@@ -11,6 +11,10 @@ import app.crimera.patches.settings.settingStrings
 import app.crimera.patches.settings.singleChoice
 import app.crimera.patches.settings.toggle
 import app.crimera.patches.newx.models.resolvedNewXInlineActionModels
+import app.crimera.patches.newx.misc.inlineactions.capturedInlineActionRendererCandidates
+import app.crimera.patches.newx.misc.inlineactions.resolveCapturedInlineActionEntryRenderer
+import app.crimera.patches.newx.misc.inlineactions.hasOnlyFallThroughInto
+import app.crimera.patches.newx.misc.inlineactions.provesValueFromInstructionOnSourcePaths
 import app.crimera.patches.newx.models.newXInlineActionModelResolutionPatch
 import app.crimera.patches.newx.models.firstParameterSlot
 import app.crimera.patches.newx.models.isInlineActionEntryRenderer
@@ -29,6 +33,7 @@ import app.crimera.patches.common.destinationRegisterOrNull
 import app.crimera.patches.common.resolveIntegerLiteralOnCurrentPath
 import app.crimera.patches.common.scopedMatchAll
 import app.crimera.patches.common.scopedMatchAllOrNull
+import app.crimera.patches.common.valueReachesRegister
 import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.Match
 import app.morphe.patcher.fieldAccess
@@ -43,6 +48,7 @@ import app.morphe.patcher.util.numberOfParameterRegisters
 import app.morphe.patcher.util.p0Register
 import app.morphe.patcher.util.registersUsed
 import com.android.tools.smali.dexlib2.Opcode
+import com.android.tools.smali.dexlib2.Format
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.builder.BuilderOffsetInstruction
 import com.android.tools.smali.dexlib2.iface.Method
@@ -53,6 +59,7 @@ import com.android.tools.smali.dexlib2.iface.instruction.Instruction
 import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.NarrowLiteralInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.OffsetInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.SwitchPayload
 import com.android.tools.smali.dexlib2.iface.instruction.ThreeRegisterInstruction
@@ -173,9 +180,18 @@ private data class PaletteAllocation(
     val branchEndIndex: Int,
 )
 
+private data class PaletteConstructorContract(
+    val primaryReference: String,
+    val defaultArgumentReferences: Set<String>,
+) {
+    val acceptedReferences: Set<String> = defaultArgumentReferences + primaryReference
+}
+
 private data class PaletteConstructor(
     val index: Int,
     val instruction: RegisterRangeInstruction,
+    val reference: String,
+    val usesDefaultArguments: Boolean,
 )
 
 private data class FactoryAllocation(
@@ -277,7 +293,7 @@ val dynamicColorPatch =
                 )
             }
 
-            val constructorReference = resolvePaletteConstructorReference(paletteDescriptor)
+            val constructorContract = resolvePaletteConstructorReference(paletteDescriptor)
             val cacheFieldsByKind = provider.resolvePaletteCacheFields(paletteDescriptor)
             val cacheFieldDescriptors = cacheFieldsByKind.values.map(FieldReference::toString).toSet()
             val factories =
@@ -287,7 +303,7 @@ val dynamicColorPatch =
                         cacheFieldsByKind.getValue(kind),
                         cacheFieldDescriptors,
                         paletteDescriptor,
-                        constructorReference,
+                        constructorContract,
                     )
                 }
 
@@ -310,7 +326,7 @@ val dynamicColorPatch =
                                 allocation = factory.paletteAllocation,
                                 kind = factory.kind,
                                 paletteDescriptor = paletteDescriptor,
-                                constructorReference = constructorReference,
+                                constructorContract = constructorContract,
                             )
                         }
                 }
@@ -325,17 +341,145 @@ val dynamicColorPatch =
     }
 
 context(context: BytecodePatchContext)
-private fun resolvePaletteConstructorReference(paletteDescriptor: String): String {
-    val constructors =
-        context.mutableClassDefBy(paletteDescriptor)
-            .methods
-            .filter { method ->
-                method.name == "<init>" &&
-                    method.returnType == "V" &&
-                    method.parameterTypes.joinToString("") == PALETTE_CONSTRUCTOR_PARAMETERS
+private fun resolvePaletteConstructorReference(paletteDescriptor: String): PaletteConstructorContract {
+    val paletteClass = context.mutableClassDefBy(paletteDescriptor)
+    val constructors = paletteClass.methods.filter { method ->
+        method.name == "<init>" && method.returnType == "V" &&
+            method.parameterTypes.joinToString("") == PALETTE_CONSTRUCTOR_PARAMETERS
+    }
+    val primary = requireExactlyOne("NewX Horizon palette constructor", constructors)
+    val primaryReference = primary.toString()
+    val defaultArgumentConstructors = paletteClass.methods.filter { method ->
+        method.isDefaultPaletteConstructorAdapter(primaryReference)
+    }
+    val defaultArgumentConstructor = requireAtMostOne(
+        "NewX Horizon default-argument palette constructor",
+        defaultArgumentConstructors,
+    )
+    return PaletteConstructorContract(
+        primaryReference = primaryReference,
+        defaultArgumentReferences = setOfNotNull(defaultArgumentConstructor?.toString()),
+    )
+}
+
+/** A Kotlin default-argument constructor is accepted only when its bytecode forwards known colors. */
+internal fun Method.isDefaultPaletteConstructorAdapter(primaryReference: String): Boolean {
+    return defaultPaletteConstructorRejection(primaryReference) == null
+}
+
+internal fun Method.defaultPaletteConstructorRejection(primaryReference: String): String? {
+    val expectedParameters = "Z" + "J".repeat(PALETTE_COLOR_COUNT - 1) + "I"
+    if (name != "<init>" || returnType != "V" || AccessFlags.STATIC.isSet(accessFlags) ||
+        parameterTypes.joinToString("") != expectedParameters
+    ) return "unexpected constructor signature $this"
+    val methodImplementation = implementation ?: return "constructor has no implementation: $this"
+    val code = methodImplementation.instructions.toList()
+    val calls = code.indices.filter { index ->
+        code[index].getReference<MethodReference>()?.toString() == primaryReference &&
+            code[index].opcode in setOf(Opcode.INVOKE_DIRECT, Opcode.INVOKE_DIRECT_RANGE)
+    }
+    val callIndex = requireAtMostOne("NewX primary palette delegation in $this", calls)
+        ?: return "expected one primary delegation, found none in $this"
+    val call = code[callIndex]
+    val range = call as? RegisterRangeInstruction ?: return "primary delegation is not range-based in $this"
+    if (range.registerCount != PALETTE_CONSTRUCTOR_REGISTER_COUNT) {
+        return "primary delegation has ${range.registerCount} registers in $this"
+    }
+    val parameterStart = methodImplementation.registerCount - parameterTypes.sumOf { parameter ->
+        if (parameter.toString() in setOf("J", "D")) 2 else 1
+    } - 1
+    val origins = paletteParameterOriginsAt(callIndex)
+        ?: return "unproven control flow before primary delegation in $this"
+    if (origins[range.startRegister] != setOf(parameterStart)) {
+        return "primary delegation does not receive this in $this"
+    }
+    if (origins[range.startRegister + 1] != setOf(parameterStart + 1)) {
+        return "primary delegation does not forward isLight in $this"
+    }
+
+    fun forwardedWideColorFailure(token: Int): String? {
+        val destination = range.startRegister + 2 + token * 2
+        val source = parameterStart + 2 + token * 2
+        if (origins[destination] != setOf(source) || origins[destination + 1] != setOf(source + 1)) {
+            return "token $token is not forwarded from v$source in $this"
+        }
+        return null
+    }
+
+    listOf(7, 8, 9, 13).forEach { token ->
+        forwardedWideColorFailure(token)?.let { return it }
+    }
+
+    val defaultedColorDestination = range.startRegister + 2 + 15 * 2
+    val defaultedColorSources = origins[defaultedColorDestination]
+    val expectedDefaultSources = setOf(parameterStart + 2 + 7 * 2, parameterStart + 2 + 15 * 2)
+    if (defaultedColorSources.isEmpty() || !expectedDefaultSources.containsAll(defaultedColorSources) ||
+        origins[defaultedColorDestination + 1] != defaultedColorSources.map { it + 1 }.toSet()
+    ) {
+        return "defaulted token 15 sources $defaultedColorSources, expected $expectedDefaultSources in $this"
+    }
+    return null
+}
+
+/** May-origins at the delegation edge; unknown writes poison the proof on every reachable path. */
+private fun Method.paletteParameterOriginsAt(targetIndex: Int): List<Set<Int>>? {
+    val body = implementation ?: return null
+    if (body.tryBlocks.isNotEmpty()) return null
+    val code = body.instructions.toList()
+    val offsets = code.runningFold(0) { offset, instruction -> offset + instruction.codeUnits }
+    val indexByOffset = offsets.dropLast(1).withIndex().associate { it.value to it.index }
+    val incoming = arrayOfNulls<List<Set<Int>>>(code.size)
+    val parameterStart = body.registerCount - numberOfParameterRegisters
+    incoming[0] = List(body.registerCount) { register ->
+        setOf(if (register >= parameterStart) register else -1)
+    }
+    val pending = java.util.ArrayDeque<Int>()
+    pending.add(0)
+    val narrowMoves = setOf(Opcode.MOVE, Opcode.MOVE_FROM16, Opcode.MOVE_16,
+        Opcode.MOVE_OBJECT, Opcode.MOVE_OBJECT_FROM16, Opcode.MOVE_OBJECT_16)
+    while (pending.isNotEmpty()) {
+        val index = pending.removeFirst()
+        if (index == targetIndex) continue
+        val instruction = code[index]
+        if (instruction.opcode in setOf(Opcode.PACKED_SWITCH, Opcode.SPARSE_SWITCH) ||
+            instruction.opcode.format.isPayloadFormat
+        ) return null
+        val before = incoming[index] ?: return null
+        val after = before.toMutableList()
+        if (instruction.opcode.setsRegister() && instruction.opcode != Opcode.CHECK_CAST) {
+            val destination = (instruction as? OneRegisterInstruction)?.registerA ?: return null
+            val move = instruction as? TwoRegisterInstruction
+            after[destination] = if (instruction.opcode in narrowMoves || instruction.opcode in WIDE_MOVE_OPCODES) {
+                before[move?.registerB ?: return null]
+            } else setOf(-1)
+            if (instruction.opcode.setsWideRegister()) {
+                after[destination + 1] = if (instruction.opcode in WIDE_MOVE_OPCODES) {
+                    before[(move?.registerB ?: return null) + 1]
+                } else setOf(-1)
             }
-    requireExactlyOne("NewX Horizon palette constructor", constructors)
-    return "$paletteDescriptor-><init>($PALETTE_CONSTRUCTOR_PARAMETERS)V"
+        }
+        val branch = instruction as? OffsetInstruction
+        val successors = when {
+            branch == null && !instruction.opcode.canContinue() -> emptyList()
+            branch != null -> {
+                val target = indexByOffset[offsets[index] + branch.codeOffset] ?: return null
+                if (!instruction.opcode.canContinue()) listOf(target)
+                else if (instruction.opcode.format in setOf(Format.Format21t, Format.Format22t)) listOf(target, index + 1)
+                else return null
+            }
+            else -> listOf(index + 1)
+        }
+        for (successor in successors) {
+            if (successor !in code.indices) return null
+            val previous = incoming[successor]
+            val merged = if (previous == null) after else previous.indices.map { previous[it] + after[it] }
+            if (merged != previous) {
+                incoming[successor] = merged
+                pending.add(successor)
+            }
+        }
+    }
+    return incoming.getOrNull(targetIndex)
 }
 
 context(context: BytecodePatchContext)
@@ -523,7 +667,7 @@ private fun resolveFactory(
     cacheField: FieldReference,
     cacheFieldDescriptors: Set<String>,
     paletteDescriptor: String,
-    constructorReference: String,
+    constructorContract: PaletteConstructorContract,
 ): ResolvedFactory {
     val holder = context.mutableClassDefBy(cacheField.definingClass)
     val initializer =
@@ -635,9 +779,9 @@ private fun resolveFactory(
         factorySelector = factorySelector,
         paletteDescriptor = paletteDescriptor,
         kind = kind,
-        constructorReference = constructorReference,
+        constructorContract = constructorContract,
     )
-    val isLight = invoke.resolvePaletteIsLight(paletteAllocation, constructorReference)
+    val isLight = invoke.resolvePaletteIsLight(paletteAllocation, constructorContract)
     if (isLight != kind.isLight) {
         throw PatchException(
             "NewX ${kind.name} palette branch has unexpected isLight=$isLight: $invoke",
@@ -703,7 +847,7 @@ private fun MutableMethod.resolvePaletteAllocationIndex(
     factorySelector: Int,
     paletteDescriptor: String,
     kind: PaletteKind,
-    constructorReference: String,
+    constructorContract: PaletteConstructorContract,
 ): PaletteAllocation {
     val switchInstructions = instructions.withIndex().filter { indexed ->
         indexed.value.opcode == Opcode.PACKED_SWITCH
@@ -729,7 +873,7 @@ private fun MutableMethod.resolvePaletteAllocationIndex(
             branchStart = defaultStart,
             branchEnd = caseEnd,
             paletteDescriptor = paletteDescriptor,
-            constructorReference = constructorReference,
+            constructorContract = constructorContract,
         )
     ) {
         throw PatchException(
@@ -762,7 +906,7 @@ private fun MutableMethod.isProvenDefaultPaletteBranch(
     branchStart: Int,
     branchEnd: Int,
     paletteDescriptor: String,
-    constructorReference: String,
+    constructorContract: PaletteConstructorContract,
 ): Boolean {
     if (branchStart >= branchEnd || branchEnd > instructions.size) return false
     val allocations = instructions.withIndex().filter { indexed ->
@@ -777,7 +921,8 @@ private fun MutableMethod.isProvenDefaultPaletteBranch(
     val constructors = instructions.withIndex().filter { indexed ->
         indexed.index > allocation.index &&
             indexed.index < branchEnd &&
-            indexed.value.getReference<MethodReference>()?.toString() == constructorReference &&
+            indexed.value.getReference<MethodReference>()?.toString()
+                ?.let(constructorContract.acceptedReferences::contains) == true &&
             indexed.value.receiverRegister() == allocationRegister
     }
     if (constructors.size != 1) return false
@@ -792,9 +937,9 @@ private fun MutableMethod.isProvenDefaultPaletteBranch(
 
 private fun MutableMethod.resolvePaletteIsLight(
     allocation: PaletteAllocation,
-    constructorReference: String,
+    constructorContract: PaletteConstructorContract,
 ): Boolean {
-    val constructor = resolvePaletteConstructor(allocation, constructorReference)
+    val constructor = resolvePaletteConstructor(allocation, constructorContract)
     val isLightRegister = constructor.instruction.startRegister + 1
     val isLightLiterals = instructions.withIndex().filter { indexed ->
         val instruction = indexed.value
@@ -813,12 +958,13 @@ private fun MutableMethod.resolvePaletteIsLight(
 
 private fun MutableMethod.resolvePaletteConstructor(
     allocation: PaletteAllocation,
-    constructorReference: String,
+    constructorContract: PaletteConstructorContract,
 ): PaletteConstructor {
     val constructorCandidates = instructions.withIndex().filter { indexed ->
         indexed.index > allocation.index &&
             indexed.index < allocation.branchEndIndex &&
-            indexed.value.getReference<MethodReference>()?.toString() == constructorReference &&
+            indexed.value.getReference<MethodReference>()?.toString()
+                ?.let(constructorContract.acceptedReferences::contains) == true &&
             indexed.value.receiverRegister() ==
                 (instructions[allocation.index] as? OneRegisterInstruction)?.registerA
     }
@@ -832,19 +978,30 @@ private fun MutableMethod.resolvePaletteConstructor(
     val allocationRegister =
         (instructions[allocation.index] as? OneRegisterInstruction)?.registerA
             ?: throw PatchException("NewX palette allocation has no destination register: $this")
+    val reference = constructor.value.getReference<MethodReference>()
+        ?: throw PatchException("NewX palette constructor reference is missing: $this")
     if (allocationRegister != range.startRegister) {
         throw PatchException(
             "NewX palette allocation v$allocationRegister does not match constructor receiver " +
                 "v${range.startRegister}: $this",
         )
     }
-    if (range.registerCount != PALETTE_CONSTRUCTOR_REGISTER_COUNT) {
+    val expectedRegisterCount = 1 + reference.parameterTypes.sumOf { parameter ->
+        if (parameter.toString() in setOf("J", "D")) 2 else 1
+    }
+    if (range.registerCount != expectedRegisterCount || reference.parameterTypes.firstOrNull()?.toString() != "Z") {
         throw PatchException(
-            "NewX palette constructor needs $PALETTE_CONSTRUCTOR_REGISTER_COUNT registers, " +
-                "found ${range.registerCount}: $this",
+            "NewX palette constructor ${reference} has an unexpected register shape: " +
+                "expected $expectedRegisterCount registers beginning with isLight, found " +
+                "${range.registerCount}: $this",
         )
     }
-    return PaletteConstructor(constructor.index, range)
+    return PaletteConstructor(
+        index = constructor.index,
+        instruction = range,
+        reference = reference.toString(),
+        usesDefaultArguments = reference.toString() in constructorContract.defaultArgumentReferences,
+    )
 }
 
 context(context: BytecodePatchContext)
@@ -1001,9 +1158,8 @@ private fun patchInlineActionTints() {
     val models = resolvedNewXInlineActionModels()
     val inlineActionEntryClass = context.mutableClassDefBy(models.inlineActionEntryDescriptor)
     val actionTypeField = models.inlineActionTypeField
-    val enabledField = models.inlineActionEnabledField
     val actionTypeDescriptor = models.postActionTypeDescriptor
-    val entryMatches =
+    val staticEntryMatches =
         Fingerprint(
             returnType = "V",
             custom = { method, _ ->
@@ -1011,23 +1167,61 @@ private fun patchInlineActionTints() {
             },
             filters = listOf(
                 fieldAccess(opcode = Opcode.IGET_OBJECT, reference = actionTypeField),
-                fieldAccess(opcode = Opcode.IGET_BOOLEAN, reference = enabledField),
+                fieldAccess(opcode = Opcode.IGET_BOOLEAN, reference = models.inlineActionEnabledField),
             ),
-        ).scopedMatchAll()
-    val entryMethod =
-        requireExactlyOne("NewX inline action entry renderer", entryMatches).method
-    val tintReference =
-        entryMethod.instructions.mapNotNull { instruction ->
+        ).scopedMatchAllOrNull().orEmpty()
+    val capturedEntryMatches = capturedInlineActionRendererCandidates(models)
+    val selectedRenderer = requireExactlyOne(
+        "NewX inline action renderer across direct and captured shapes",
+        staticEntryMatches.map { match -> match.originalMethod } +
+            capturedEntryMatches.map { candidate -> candidate.method },
+    )
+    val staticEntryMatch = staticEntryMatches.singleOrNull { match -> match.originalMethod == selectedRenderer }
+    val capturedEntryMatch = if (staticEntryMatch == null) {
+        requireExactlyOne(
+            "NewX captured inline action renderer candidate",
+            capturedEntryMatches.filter { candidate -> candidate.method == selectedRenderer },
+        )
+    } else null
+    val entryMethod = if (staticEntryMatch != null) {
+        staticEntryMatch.method
+    } else {
+        val candidate = requireNotNull(capturedEntryMatch)
+        requireExactlyOne(
+            "NewX mutable captured inline action renderer",
+            context.mutableClassDefBy(candidate.method.definingClass).methods.filter { method ->
+                method.name == candidate.method.name &&
+                    method.parameterTypes == candidate.method.parameterTypes &&
+                    method.returnType == candidate.method.returnType
+            },
+        )
+    }
+    val capturedRenderer = if (capturedEntryMatch == null) null else {
+        resolveCapturedInlineActionEntryRenderer(
+            entryMethod,
+            capturedEntryMatch.owner,
+            models,
+            resolveIconSize = false,
+        )
+    }
+    val tintReference = if (capturedRenderer != null) {
+        capturedRenderer.tintRenderer
+    } else {
+        requireExactlyOne(
+            "NewX inline action tint renderer call in $entryMethod",
+            entryMethod.instructions.mapNotNull { instruction ->
             if (instruction.opcode != Opcode.INVOKE_STATIC &&
                 instruction.opcode != Opcode.INVOKE_STATIC_RANGE
             ) {
-                return@mapNotNull null
+                    return@mapNotNull null
             }
             instruction.getReference<MethodReference>()
-    }.singleOrNull { reference ->
-            reference.parameterTypes.firstOrNull() == actionTypeDescriptor &&
-                reference.returnType == "V"
-        } ?: throw PatchException("NewX inline action tint renderer call not found: $entryMethod")
+            }.filter { reference ->
+                reference.parameterTypes.firstOrNull()?.toString() == actionTypeDescriptor &&
+                    reference.returnType == "V"
+            },
+        )
+    }
     val tintMethod = tintReference.resolveMutableMethod("NewX inline action tint renderer")
     val unfavoriteReads = tintMethod.instructions.withIndex().filter { indexed ->
         indexed.value.opcode == Opcode.SGET_OBJECT &&
@@ -1064,40 +1258,92 @@ private fun patchInlineActionTints() {
                     reference.definingClass.hasComposableLambdaInvoke()
             }.distinctBy(MethodReference::toString)
     val likeComposableConstructor =
-        requireExactlyOne("NewX like icon composable constructor", likeComposableConstructors)
+        requireAtMostOne("NewX standalone like icon composable constructor", likeComposableConstructors)
+    val unifiedLikeRendererCandidates =
+        if (likeComposableConstructor == null) tintMethod.unifiedLikeButtonRendererCalls() else emptyList()
 
-    // First wide long slot (the tint timestamp); Compose inserts auxiliary params between
-    // releases, so resolve the slot instead of hardcoding p2. The renderer is static, so the
-    // parameter slot is `p0` plus the slot index.
-    if (!AccessFlags.STATIC.isSet(entryMethod.accessFlags)) {
-        throw PatchException("NewX inline action entry renderer is unexpectedly instance: $entryMethod")
-    }
-    val tintSlot = entryMethod.firstParameterSlot("J")
-    val tintRegister = entryMethod.p0Register + tintSlot
-    val contentRegister = entryMethod.resolveInlineActionContentRegister(tintRegister)
-
-    entryMethod.insertHook(
-        index = 0,
-        // The old insertion never moved labels off the first instruction, so a branch that
-        // reached the method head kept skipping the tint and has to keep doing so.
-        relocateBranchTargets = false,
-    ) {
-        invokeStatic(methodReference(INLINE_ACTION_TINT_METHOD), tintRegister, tintRegister + 1)
-        moveResult(tintRegister, "J")
-    }
-    if (contentRegister != null) {
-        entryMethod.insertHook(index = 0, relocateBranchTargets = false) {
-            invokeStatic(
-                methodReference(INLINE_ACTION_CONTENT_TINT_METHOD),
-                contentRegister,
-                contentRegister + 1,
+    if (capturedRenderer == null) {
+        // Historical renderers receive both colors as composable parameters. Resolve the wide
+        // slots from the ABI instead of tying them to one lowered parameter count.
+        if (!AccessFlags.STATIC.isSet(entryMethod.accessFlags)) {
+            throw PatchException("NewX inline action entry renderer is unexpectedly instance: $entryMethod")
+        }
+        val tintRegister = entryMethod.p0Register + entryMethod.firstParameterSlot("J")
+        val contentRegister = entryMethod.resolveInlineActionContentRegister(tintRegister)
+        entryMethod.insertHook(0, relocateBranchTargets = false) {
+            invokeStatic(methodReference(INLINE_ACTION_TINT_METHOD), tintRegister, tintRegister + 1)
+            moveResult(tintRegister, "J")
+        }
+        if (contentRegister != null) {
+            entryMethod.insertHook(index = 0, relocateBranchTargets = false) {
+                invokeStatic(
+                    methodReference(INLINE_ACTION_CONTENT_TINT_METHOD),
+                    contentRegister,
+                    contentRegister + 1,
+                )
+                moveResult(contentRegister, "J")
+            }
+        }
+    } else {
+        val colorLoads = buildList {
+            add(
+                Triple(
+                    capturedRenderer.tintReadIndex,
+                    capturedRenderer.tintRegister,
+                    INLINE_ACTION_TINT_METHOD,
+                ),
             )
-            moveResult(contentRegister, "J")
+            if (capturedRenderer.contentTintReadIndex != null && capturedRenderer.contentTintRegister != null) {
+                add(
+                    Triple(
+                        capturedRenderer.contentTintReadIndex,
+                        capturedRenderer.contentTintRegister,
+                        INLINE_ACTION_CONTENT_TINT_METHOD,
+                    ),
+                )
+            }
+        }
+        colorLoads.sortedByDescending { (readIndex, _, _) -> readIndex }.forEach { (readIndex, register, method) ->
+            val hookIndex = readIndex + 1
+            if (!entryMethod.hasOnlyFallThroughInto(hookIndex)) {
+                throw PatchException(
+                    "NewX captured inline-action tint hook has an unproven incoming edge: " +
+                        "$entryMethod at $hookIndex",
+                )
+            }
+            entryMethod.insertHook(hookIndex, relocateBranchTargets = false) {
+                invokeStatic(methodReference(method), register, register + 1)
+                moveResult(register, "J")
+            }
         }
     }
-    val activeLikeField = tintMethod.injectActivatedLikeTint(unfavoriteRead.index)
-    patchLikeIconComposable(likeComposableConstructor.definingClass, activeLikeField)
+    val activatedTint = tintMethod.injectActivatedLikeTint(unfavoriteRead.index)
+    if (likeComposableConstructor != null) {
+        patchLikeIconComposable(likeComposableConstructor.definingClass, activatedTint.field)
+    } else {
+        requireExactlyOne(
+            "NewX unified like-button renderer receiving the activated tint",
+            unifiedLikeRendererCandidates.filter { candidate ->
+                candidate.index == activatedTint.rendererCallIndex
+            },
+        )
+    }
 }
+
+/** The unified icon/button composable consumes two action callbacks and both tint planes. */
+private fun MutableMethod.unifiedLikeButtonRendererCalls(): List<IndexedValue<Instruction>> =
+    instructions.withIndex().filter { indexed ->
+        val instruction = indexed.value
+        if (instruction.opcode != Opcode.INVOKE_STATIC && instruction.opcode != Opcode.INVOKE_STATIC_RANGE) {
+            return@filter false
+        }
+        val reference = instruction.getReference<MethodReference>() ?: return@filter false
+        val parameters = reference.parameterTypes.map(CharSequence::toString)
+        instruction.isComposeRendererCall() &&
+            COMPOSE_RUNTIME_COMPOSER_DESCRIPTOR in parameters &&
+            parameters.count { parameter -> parameter == FUNCTION0_DESCRIPTOR } >= 2 &&
+            parameters.count { parameter -> parameter == "J" } >= 3
+    }
 
 /**
  * The count color the host may override (the media viewer passes plain white), found by data
@@ -1172,11 +1418,9 @@ private const val TAB_TINT_METHOD = "$DYNAMIC_COLOR_PALETTE_DESCRIPTOR->tabTint(
 private const val TAB_SECONDARY_TINT_METHOD =
     "$DYNAMIC_COLOR_PALETTE_DESCRIPTOR->tabSecondaryTint(J)J"
 private const val TAB_RENDERER_SCOPE = "Lcom/x/ui/common/tabs/"
-private const val PROFILE_INDICATOR_SCOPE = "Landroidx/compose/foundation/text/"
 private const val INDICATOR_COLOR_LABEL = "indicatorColor"
 private const val COMPOSE_MODIFIER_DESCRIPTOR = "Landroidx/compose/ui/Modifier;"
 private const val COMPOSE_RUNTIME_COMPOSER_DESCRIPTOR = "Landroidx/compose/runtime/Composer;"
-private const val JAVA_LIST_DESCRIPTOR = "Ljava/util/List;"
 private const val COMPOSE_FOUNDATION_SCOPE = "Landroidx/compose/foundation/"
 
 /**
@@ -1185,7 +1429,7 @@ private const val COMPOSE_FOUNDATION_SCOPE = "Landroidx/compose/foundation/"
  * releases. Framework slot-table, density, and color-unpack reads are noise and excluded, as
  * are the resolved Horizon reads. Callers pass the resolved Horizon descriptor.
  */
-private val FRAMEWORK_OWNER_PREFIXES = listOf(
+internal val FRAMEWORK_OWNER_PREFIXES = listOf(
     "Landroidx/",
     "Lkotlin/",
     "Lkotlinx/",
@@ -1249,16 +1493,6 @@ private fun isTabIndicatorRenderer(method: Method): Boolean {
     } && hasFoundationBackground(instructions)
 }
 
-private fun isProfileTabIndicator(method: Method, horizon: String): Boolean {
-    val instructions = method.implementation?.instructions?.toList().orEmpty()
-    val reads = wideReadsByOwner(method, horizon)
-    // The profile indicator stopped reading the tab package's static width in 12.27;
-    // the semantic color-to-foundation-background flow remains unchanged.
-    if (reads.size != 1) return false
-    val ownerReads = reads.values.first()
-    return ownerReads.size == 1 && hasFoundationBackground(instructions)
-}
-
 private fun tabSlotColorsFingerprint(horizon: String) = Fingerprint(
     definingClass = TAB_RENDERER_SCOPE,
     custom = { method, _ -> isTabSlotColors(method, horizon) },
@@ -1269,53 +1503,42 @@ private object NewXTabIndicatorRendererFingerprint : Fingerprint(
     custom = { method, _ -> isTabIndicatorRenderer(method) },
 )
 
-private fun profileTabIndicatorFingerprint(horizon: String) = Fingerprint(
-    definingClass = PROFILE_INDICATOR_SCOPE,
-    returnType = "Ljava/lang/Object;",
-    custom = { method, classDef ->
-        // Do not include nested framework helpers such as text/selection; only the direct
-        // foundation/text lambda owns the profile indicator in the supported shapes.
-        classDef.type.removePrefix(PROFILE_INDICATOR_SCOPE).contains('/') == false &&
-            isProfileTabIndicator(method, horizon)
-    },
-)
-
 context(context: BytecodePatchContext)
 private fun patchTabTints(horizon: String) {
     val slots = tabSlotColorsFingerprint(horizon).scopedMatchAllOrNull().orEmpty()
     val indicatorMatches = NewXTabIndicatorRendererFingerprint.scopedMatchAllOrNull().orEmpty()
-    val profileMatches = profileTabIndicatorFingerprint(horizon).scopedMatchAllOrNull().orEmpty()
     val slotMatch = requireAtMostOne("NewX tab slot renderer", slots)
     val indicatorMatch = requireAtMostOne("NewX tab indicator renderer", indicatorMatches)
-    val profileMatch = requireAtMostOne("NewX profile tab indicator", profileMatches)
-    val containerReference = slotMatch?.method?.resolveTabContainerReference(horizon)
-    // Releases without a dedicated profile painter share the container indicator for timeline
-    // and profile tabs; that sharing is proven by profile code calling the tabs container.
-    val sharingProof =
-        if (profileMatch == null && containerReference != null) {
-            profileSharesContainerIndicator(containerReference)
-        } else {
-            emptyList()
-        }
-    val sharingMatch =
-        requireAtMostOne("NewX profile/container indicator sharing proof", sharingProof)
-    val sharedIndicator = profileMatch == null && sharingMatch != null
-    if (
-        slotMatch != null &&
-            indicatorMatch != null &&
-            (profileMatch != null || sharedIndicator)
-    ) {
-        slotMatch.method.injectTabSlotTints(horizon)
-        indicatorMatch.method.injectTabIndicatorTint()
-        profileMatch?.method?.injectProfileTabIndicatorTint(horizon)
-        return
+    if (slotMatch == null || indicatorMatch == null) {
+        throw PatchException(
+            "NewX tab tint shapes are unmapped: slots=${slots.size}, " +
+                "indicator=${indicatorMatches.size} for $horizon: " +
+                (slots + indicatorMatches).joinToString(),
+        )
     }
-    throw PatchException(
-        "NewX tab tint shapes are unmapped: slots=${slots.size}, " +
-            "indicator=${indicatorMatches.size}, profile=${profileMatches.size} for $horizon: " +
-            (slots + indicatorMatches + profileMatches).joinToString(),
-    )
+    // Resolve every site before the first mutation: the slot tints and the indicator
+    // parameter tint must not shift the callback's instruction indices.
+    val site = resolveTabIndicatorTintSite(slotMatch.method, horizon) { descriptor ->
+        context.mutableClassDefByOrNull(descriptor)
+    }
+    val callbackMethod = site.method as? MutableMethod
+        ?: throw PatchException("NewX tab indicator callback is not mutable: ${site.method}")
+    if (
+        callbackMethod.isSameMethodAs(slotMatch.method) ||
+            callbackMethod.isSameMethodAs(indicatorMatch.method)
+    ) {
+        throw PatchException("NewX tab indicator callback shares a method with another tint site")
+    }
+    slotMatch.method.injectTabSlotTints(horizon)
+    indicatorMatch.method.injectTabIndicatorTint()
+    callbackMethod.injectTabIndicatorCallbackTint(site)
 }
+
+private fun Method.isSameMethodAs(other: Method): Boolean =
+    definingClass == other.definingClass &&
+        name == other.name &&
+        returnType == other.returnType &&
+        parameterTypes.map(CharSequence::toString) == other.parameterTypes.map(CharSequence::toString)
 
 /** The J field read is the indexable anchor; [isComposeModifierBackground] stays the shape check. */
 private object XdsChromeBackgroundFingerprint : Fingerprint(
@@ -1630,9 +1853,9 @@ private fun patchMediaViewerTextColors() {
     context.classDefForEach { classDef ->
         if (classDef.type.startsWith(MEDIA_VIEWER_CHROME_PACKAGE)) chromeClasses += classDef.type
     }
-    // Older targets (12.27 prod) have no immersive chrome, so there is no media viewer text to
-    // theme. A chrome that exists but has no matching Text calls is drift and fails below.
-    if (chromeClasses.isEmpty()) return
+    if (chromeClasses.isEmpty()) {
+        throw PatchException("NewX media viewer immersive chrome is missing")
+    }
     var hookCount = 0
     for (descriptor in chromeClasses) {
         for (method in context.mutableClassDefBy(descriptor).methods) {
@@ -1662,7 +1885,7 @@ private fun patchMediaViewerTextColors() {
     }
     patchMediaViewerRichTextColors()
     patchMediaViewerIconTints(chromeClasses)
-    patchMediaViewerFollowPill()
+    patchMediaViewerFollowPill(chromeClasses)
     patchMediaViewerButtonContentColors()
     patchMediaViewerUserNameColors()
 }
@@ -1693,15 +1916,47 @@ private fun patchMediaViewerIconTints(chromeClasses: List<String>) {
  * buttons keep their values. Zero matches skip the pill; more than one throws.
  */
 context(context: BytecodePatchContext)
-private fun patchMediaViewerFollowPill() {
-    val buttons =
-        findMethodsInPackage(PORTS_BUTTON_PACKAGE) { method ->
-            val instructions = method.implementation?.instructions ?: return@findMethodsInPackage false
-            instructions.any { it.isComposeIconCall() } && instructions.any { it.isMaterialTextCall() }
+private fun patchMediaViewerFollowPill(chromeClasses: List<String>) {
+    val buttonCalls = chromeClasses.flatMap { descriptor ->
+        context.mutableClassDefBy(descriptor).methods.flatMap { caller ->
+            caller.implementation?.instructions?.mapNotNull { instruction ->
+                if (instruction.opcode !in setOf(Opcode.INVOKE_STATIC, Opcode.INVOKE_STATIC_RANGE)) {
+                    return@mapNotNull null
+                }
+                instruction.getReference<MethodReference>()?.takeIf {
+                    it.definingClass.startsWith(PORTS_BUTTON_PACKAGE)
+                }
+            }.orEmpty()
         }
-    val method = requireAtMostOne("NewX media viewer follow pill", buttons) ?: return
+    }.distinctBy(MethodReference::toString)
+    val buttonContentMethods = buttonCalls.mapNotNull { reference ->
+        val owner = context.mutableClassDefBy(reference.definingClass)
+        requireExactlyOne(
+            "NewX media viewer button method $reference",
+            owner.methods.filter { it.toString() == reference.toString() },
+        ).takeIf { it.isMediaViewerButtonContent() }
+    }.distinctBy { it.toString() }
+    val method = requireAtMostOne("NewX media viewer follow pill content", buttonContentMethods) ?: return
     if (method.hookExactWhiteIconTints() == 0) {
         throw PatchException("NewX media viewer follow pill has no icon to theme: $method")
+    }
+}
+
+internal fun Method.isMediaViewerButtonContent(): Boolean {
+    if (!AccessFlags.STATIC.isSet(accessFlags) || returnType != "V") return false
+    val parameters = parameterTypes.map(CharSequence::toString)
+    if (parameters.count { it == COMPOSER_DESCRIPTOR } != 1) return false
+    val instructions = implementation?.instructions?.toList() ?: return false
+    if (instructions.none { it.isMaterialTextCall() }) return false
+    return instructions.withIndex().any { (index, instruction) ->
+        if (!instruction.isComposeIconCall()) return@any false
+        val reference = instruction.getReference<MethodReference>() ?: return@any false
+        val flagsRegister = instructions.invokeArgumentRegister(index, reference, COMPOSE_ICON_DEFAULTS_PARAMETER)
+            ?: throw PatchException("NewX media button icon defaults register is missing: $this")
+        val flags = instructions.resolveIntegerLiteralOnCurrentPath(index, flagsRegister)
+            ?: throw PatchException("NewX media button icon defaults are unproven: $this")
+        // A defaulted tint ignores the explicit argument and cannot be themed at this edge.
+        flags and (1 shl COMPOSE_ICON_TINT_PARAMETER) == 0
     }
 }
 
@@ -1782,7 +2037,7 @@ private fun MutableMethod.hookExactWhiteIconTints(): Int {
 
 /**
  * The author name in the media viewer is the user row's name composable, which takes two strings
- * (name, handle). Builds without that shape (12.31) skip it, so it is only claimed where it exists and passes its color through to material Text. The viewer passes explicit sRGB
+ * (name, handle) and passes its color through to material Text. The viewer passes explicit sRGB
  * white to it, so only that exact white is routed through the palette.
  */
 context(context: BytecodePatchContext)
@@ -1793,8 +2048,7 @@ private fun patchMediaViewerUserNameColors() {
                 listOf("Ljava/lang/String;", "Ljava/lang/String;") &&
                 method.implementation?.instructions?.any { it.isMaterialTextCall() } == true
         }
-    // 12.31 has no (String, String) user row composable, so the element is skipped there.
-    val method = requireAtMostOne("NewX media viewer author name", nameMethods) ?: return
+    val method = requireExactlyOne("NewX media viewer author name", nameMethods)
     if (method.hookMaterialTextColors() == 0) {
         throw PatchException("NewX media viewer author name has no Text calls to theme: $method")
     }
@@ -1922,9 +2176,9 @@ private fun patchMediaViewerRichTextColors() {
             }
         }
     }
-    // Older viewers (12.29 prod) have no shared rich-text call; their body text stays untouched
-    // instead of failing the whole theme patch on a declared target.
-    if (hookCount == 0) return
+    if (hookCount == 0) {
+        throw PatchException("NewX media viewer rich text has no shared rich-text calls to theme")
+    }
 }
 
 /**
@@ -2207,67 +2461,6 @@ private fun String.registerWidth(): Int = if (this == "J" || this == "D") 2 else
 private const val MODIFIER_DESCRIPTOR = "Landroidx/compose/ui/Modifier;"
 private const val COMPOSER_DESCRIPTOR = "Landroidx/compose/runtime/Composer;"
 
-private fun MethodReference.isTabContainerRenderer(): Boolean {
-    val parameters = parameterTypes.map(CharSequence::toString)
-    return definingClass.startsWith(TAB_RENDERER_SCOPE) &&
-        returnType == "V" &&
-        COMPOSE_MODIFIER_DESCRIPTOR in parameters &&
-        COMPOSE_RUNTIME_COMPOSER_DESCRIPTOR in parameters &&
-        "J" in parameters &&
-        (
-            parameters.firstOrNull() == JAVA_LIST_DESCRIPTOR ||
-                (
-                    parameters.size == 7 &&
-                        parameters.firstOrNull()?.startsWith(TAB_RENDERER_SCOPE) == true &&
-                        parameters.count { parameter -> parameter == "Ljava/lang/String;" } == 1 &&
-                        parameters.count { parameter -> parameter == "J" } == 1 &&
-                        parameters.count { parameter -> parameter == FUNCTION0_DESCRIPTOR } == 1 &&
-                        parameters.count { parameter -> parameter == "I" } == 1
-                    )
-            )
-}
-
-private fun Instruction.firstStaticArgumentRegister(): Int? =
-    if (opcode == Opcode.INVOKE_STATIC || opcode == Opcode.INVOKE_STATIC_RANGE) {
-        registersUsed.firstOrNull()
-    } else {
-        null
-    }
-
-private fun MutableMethod.resolveTabContainerReference(horizon: String): MethodReference {
-    val calls = instructions.withIndex().filter { indexed ->
-        val instruction = indexed.value
-        (instruction.opcode == Opcode.INVOKE_STATIC ||
-            instruction.opcode == Opcode.INVOKE_STATIC_RANGE) &&
-            instruction.getReference<MethodReference>()?.let { reference ->
-                reference.isTabContainerRenderer() &&
-                    hasTabContainerArgumentFlow(indexed.index, reference, horizon)
-            } == true
-    }
-    val call = requireExactlyOne("NewX tabs container call in slot renderer", calls)
-    return call.value.getReference<MethodReference>()
-        ?: throw PatchException("NewX tabs container call reference is missing: $this")
-}
-
-private val OBJECT_MOVE_OPCODES =
-    setOf(Opcode.MOVE_OBJECT, Opcode.MOVE_OBJECT_FROM16, Opcode.MOVE_OBJECT_16)
-
-private fun Instruction.objectDestinationRegister(): Int? =
-    when {
-        opcode in OBJECT_MOVE_OPCODES -> (this as? TwoRegisterInstruction)?.registerA
-        opcode == Opcode.IGET_OBJECT -> (this as? TwoRegisterInstruction)?.registerA
-        opcode == Opcode.AGET_OBJECT -> (this as? ThreeRegisterInstruction)?.registerA
-        opcode == Opcode.NEW_INSTANCE ||
-            opcode == Opcode.MOVE_RESULT_OBJECT ||
-            opcode == Opcode.SGET_OBJECT ||
-            opcode == Opcode.CHECK_CAST ||
-            opcode == Opcode.MOVE_EXCEPTION ||
-            opcode == Opcode.CONST_STRING ||
-            opcode == Opcode.CONST_STRING_JUMBO ||
-            opcode == Opcode.CONST_CLASS -> (this as? OneRegisterInstruction)?.registerA
-        else -> null
-    }
-
 private val TAB_WIDE_MOVE_OPCODES =
     setOf(Opcode.MOVE_WIDE, Opcode.MOVE_WIDE_FROM16, Opcode.MOVE_WIDE_16)
 
@@ -2301,185 +2494,6 @@ private fun List<Instruction>.invokeArgumentRegister(
     return getOrNull(callIndex)?.registersUsed?.getOrNull(wordOffset)
 }
 
-private fun List<Instruction>.wideArgumentFlowsFromPalette(
-    callIndex: Int,
-    argumentRegister: Int,
-    horizon: String,
-): Boolean {
-    val pending = mutableListOf(callIndex to argumentRegister)
-    val visited = mutableSetOf<Pair<Int, Int>>()
-    while (pending.isNotEmpty()) {
-        val (searchEnd, register) = pending.removeAt(pending.lastIndex)
-        if (!visited.add(searchEnd to register)) continue
-        val definitionIndex =
-            (searchEnd - 1 downTo 0).firstOrNull { index ->
-                this[index].wideDestinationRegister() == register
-            } ?: continue
-        val definition = this[definitionIndex]
-        when (definition.opcode) {
-            in TAB_WIDE_MOVE_OPCODES -> {
-                val sourceRegister = definition.wideSourceRegister() ?: continue
-                pending += definitionIndex to sourceRegister
-            }
-            Opcode.IGET_WIDE,
-            Opcode.SGET_WIDE,
-            -> {
-                val field = definition.getReference<FieldReference>() ?: continue
-                if (
-                    field.type == "J" &&
-                        field.definingClass != horizon &&
-                        FRAMEWORK_OWNER_PREFIXES.none(field.definingClass::startsWith)
-                ) {
-                    return true
-                }
-            }
-            else -> continue
-        }
-    }
-    return false
-}
-
-private fun List<Instruction>.objectArgumentFlowsFromDescriptor(
-    callIndex: Int,
-    argumentRegister: Int,
-    descriptor: String,
-    parameterRegister: Int? = null,
-): Boolean {
-    val pending = mutableListOf(callIndex to argumentRegister)
-    val visited = mutableSetOf<Pair<Int, Int>>()
-    while (pending.isNotEmpty()) {
-        val (searchEnd, register) = pending.removeAt(pending.lastIndex)
-        if (!visited.add(searchEnd to register)) continue
-            val definitionIndex =
-            (searchEnd - 1 downTo 0).firstOrNull { index ->
-                this[index].objectDestinationRegister() == register
-            } ?: return parameterRegister == register
-        val definition = this[definitionIndex]
-        if (definition.opcode in OBJECT_MOVE_OPCODES) {
-            val move = definition as? TwoRegisterInstruction ?: continue
-            pending += definitionIndex to move.registerB
-            continue
-        }
-        val producedDescriptor =
-            when (definition.opcode) {
-                Opcode.NEW_INSTANCE,
-                Opcode.CHECK_CAST,
-                -> definition.getReference<TypeReference>()?.type
-                Opcode.SGET_OBJECT,
-                Opcode.IGET_OBJECT,
-                -> definition.getReference<FieldReference>()?.type
-                Opcode.MOVE_RESULT_OBJECT ->
-                    this.getOrNull(definitionIndex - 1)
-                        ?.getReference<MethodReference>()
-                        ?.returnType
-                else -> null
-            }
-        if (producedDescriptor == descriptor) return true
-    }
-    return false
-}
-
-private fun MutableMethod.hasTabContainerArgumentFlow(
-    callIndex: Int,
-    reference: MethodReference,
-    horizon: String,
-): Boolean {
-    val parameters = reference.parameterTypes.map(CharSequence::toString)
-    val firstArgumentRegister =
-        instructions.invokeArgumentRegister(callIndex, reference, 0) ?: return false
-    if (parameters.firstOrNull() == JAVA_LIST_DESCRIPTOR) {
-        return instructions.objectArgumentFlowsFromList(callIndex, firstArgumentRegister) ||
-            (
-                parameterTypes.firstOrNull()?.toString()?.isListDescriptor() == true &&
-                    instructions.objectArgumentFlowsFromDescriptor(
-                        callIndex,
-                        firstArgumentRegister,
-                        parameterTypes.first().toString(),
-                        implementation?.registerCount?.minus(numberOfParameterRegisters),
-                    )
-                )
-    }
-    val wideParameterIndex = parameters.indexOfFirst { parameter -> parameter == "J" }
-    val wideArgumentRegister =
-        instructions.invokeArgumentRegister(callIndex, reference, wideParameterIndex)
-            ?: return false
-    return instructions.objectArgumentFlowsFromDescriptor(
-        callIndex,
-        firstArgumentRegister,
-        parameters.firstOrNull() ?: return false,
-    ) && instructions.wideArgumentFlowsFromPalette(callIndex, wideArgumentRegister, horizon)
-}
-
-private fun String.isListDescriptor(): Boolean =
-    this == JAVA_LIST_DESCRIPTOR ||
-        this == "Ljava/util/Collection;" ||
-        this == "Ljava/util/ArrayList;" ||
-        (startsWith("Ljava/util/") &&
-            (endsWith("List;") || endsWith("Collection;")))
-
-private fun List<Instruction>.listSourceDescriptor(
-    index: Int,
-): String? {
-    val instruction = this[index]
-    return when (instruction.opcode) {
-        Opcode.NEW_INSTANCE,
-        Opcode.CHECK_CAST,
-        -> instruction.getReference<TypeReference>()?.type
-        Opcode.SGET_OBJECT,
-        Opcode.IGET_OBJECT,
-        -> instruction.getReference<FieldReference>()?.type
-        Opcode.MOVE_RESULT_OBJECT ->
-            getOrNull(index - 1)?.getReference<MethodReference>()?.returnType
-        else -> null
-    }
-}
-
-private fun List<Instruction>.objectArgumentFlowsFromList(
-    callIndex: Int,
-    argumentRegister: Int,
-): Boolean {
-    val pending = mutableListOf(callIndex to argumentRegister)
-    val visited = mutableSetOf<Pair<Int, Int>>()
-    while (pending.isNotEmpty()) {
-        val (searchEnd, register) = pending.removeAt(pending.lastIndex)
-        if (!visited.add(searchEnd to register)) continue
-        val definitionIndex = (searchEnd - 1 downTo 0).firstOrNull { index ->
-            this[index].objectDestinationRegister() == register
-        } ?: continue
-        val definition = this[definitionIndex]
-        if (definition.opcode in OBJECT_MOVE_OPCODES) {
-            val move = definition as? TwoRegisterInstruction ?: continue
-            pending += definitionIndex to move.registerB
-            continue
-        }
-        if (listSourceDescriptor(definitionIndex)?.isListDescriptor() == true) return true
-    }
-    return false
-}
-
-context(context: BytecodePatchContext)
-private fun profileSharesContainerIndicator(containerReference: MethodReference): List<Match> =
-    Fingerprint(
-        definingClass = "Lcom/x/profile/",
-        custom = { method, _ ->
-            val instructions = method.implementation?.instructions?.toList().orEmpty()
-            val calls = instructions.withIndex().filter { indexed ->
-                val instruction = indexed.value
-                (instruction.opcode == Opcode.INVOKE_STATIC ||
-                    instruction.opcode == Opcode.INVOKE_STATIC_RANGE) &&
-                    instruction.getReference<MethodReference>()?.toString() ==
-                        containerReference.toString()
-            }
-            if (calls.size != 1) {
-                false
-            } else {
-                val call = calls[0]
-                call.value.firstStaticArgumentRegister()?.let { argumentRegister ->
-                    instructions.objectArgumentFlowsFromList(call.index, argumentRegister)
-                } == true
-            }
-        },
-    ).scopedMatchAllOrNull().orEmpty()
 private fun MutableMethod.injectTabSlotTints(horizon: String) {
     val reads =
         requireExactlyOne(
@@ -2531,32 +2545,15 @@ private fun MutableMethod.injectTabIndicatorTint() {
     }
 }
 
-private fun MutableMethod.injectProfileTabIndicatorTint(horizon: String) {
-    val reads = wideReadsByOwner(this, horizon)
-    val brandReads = reads.values.flatten()
-    val brandSites =
-        brandReads.filter { (index, _) ->
-            instructions.drop(index + 1).take(4).any { instruction ->
-                instruction.getReference<MethodReference>()?.let { reference ->
-                    reference.definingClass.startsWith(COMPOSE_FOUNDATION_SCOPE) &&
-                        reference.parameterTypes.getOrNull(0) == COMPOSE_MODIFIER_DESCRIPTOR &&
-                        "J" in reference.parameterTypes &&
-                        reference.returnType == COMPOSE_MODIFIER_DESCRIPTOR
-                } == true
-            }
-        }
-    val brandSite = requireExactlyOne("NewX profile tab indicator tint site", brandSites)
-    val colorRegister =
-        (brandSite.value as? OneRegisterInstruction)?.registerA
-            ?: throw PatchException("NewX profile tab indicator has no color register: $this")
+private fun MutableMethod.injectTabIndicatorCallbackTint(site: TabIndicatorTintSite) {
     insertHook(
-        index = brandSite.index + 1,
-        // The old insertion left labels on the brand color read: a branch that reached the read
-        // directly was not tinted before and is not tinted now.
+        index = site.loadIndex + 1,
+        // Labels stay on the original instruction, so a path that reaches another color read
+        // bypasses this tint, matching the slot tint policy.
         relocateBranchTargets = false,
     ) {
-        invokeStatic(methodReference(TAB_TINT_METHOD), colorRegister, colorRegister + 1)
-        moveResult(colorRegister, "J")
+        invokeStatic(methodReference(TAB_TINT_METHOD), site.colorRegister, site.colorRegister + 1)
+        moveResult(site.colorRegister, "J")
     }
 }
 
@@ -2612,31 +2609,26 @@ private fun Instruction.isComposeRendererCall(): Boolean {
         "J" in parameters
 }
 
-private fun MutableMethod.wideColorFeedsComposeRenderer(
+private data class ResolvedActivatedLikeTint(
+    val field: FieldReference,
+    val rendererCallIndex: Int,
+)
+
+private fun MutableMethod.composeRendererCallsForWideValue(
     loadIndex: Int,
     loadRegister: Int,
-): Boolean {
-    val aliases = mutableSetOf(loadRegister)
+): List<IndexedValue<Instruction>> {
     val methodInstructions = instructions.toList()
-    for (indexed in methodInstructions.withIndex().drop(loadIndex + 1)) {
-        val instruction = indexed.value
-        if (instruction.opcode in WIDE_MOVE_OPCODES) {
-            val move = instruction as? TwoRegisterInstruction
-            if (move != null && move.registerB in aliases) {
-                aliases += move.registerA
-            }
-        }
-        if (instruction.isComposeRendererCall()) {
-            val reference = instruction.getReference<MethodReference>() ?: continue
-            if (instruction.wideArgumentStarts(reference).any { it in aliases }) {
-                return true
-            }
+    return methodInstructions.withIndex().filter { indexed ->
+        if (indexed.index <= loadIndex || !indexed.value.isComposeRendererCall()) return@filter false
+        val reference = indexed.value.getReference<MethodReference>() ?: return@filter false
+        indexed.value.wideArgumentStarts(reference).any { targetRegister ->
+            provesValueFromInstructionOnSourcePaths(loadIndex, loadRegister, indexed.index, targetRegister)
         }
     }
-    return false
 }
 
-private fun MutableMethod.injectActivatedLikeTint(unfavoriteIndex: Int): FieldReference {
+private fun MutableMethod.injectActivatedLikeTint(unfavoriteIndex: Int): ResolvedActivatedLikeTint {
     val methodInstructions = instructions.toList()
     val unfavoriteRead = methodInstructions.getOrNull(unfavoriteIndex)
         ?: throw PatchException("NewX Unfavorite enum read is out of bounds: $this")
@@ -2711,7 +2703,7 @@ private fun MutableMethod.injectActivatedLikeTint(unfavoriteIndex: Int): FieldRe
             }.filter { indexed ->
                 val colorRegister = (indexed.value as? OneRegisterInstruction)?.registerA
                     ?: return@filter false
-                wideColorFeedsComposeRenderer(indexed.index, colorRegister)
+                composeRendererCallsForWideValue(indexed.index, colorRegister).isNotEmpty()
             }
         }
     }
@@ -2721,6 +2713,10 @@ private fun MutableMethod.injectActivatedLikeTint(unfavoriteIndex: Int): FieldRe
         ?: throw PatchException("NewX activated-like tint field is missing: $this")
     val colorRegister = (colorLoad.value as? OneRegisterInstruction)?.registerA
         ?: throw PatchException("NewX activated-like tint is not a one-register wide load: $this")
+    val rendererCallIndex = requireExactlyOne(
+        "NewX activated-like tint Compose renderer call",
+        composeRendererCallsForWideValue(colorLoad.index, colorRegister),
+    ).index
     insertHook(
         index = colorLoad.index + 1,
         // The old insertion left labels on the active-branch color load, so the tint still covers
@@ -2734,7 +2730,7 @@ private fun MutableMethod.injectActivatedLikeTint(unfavoriteIndex: Int): FieldRe
         )
         moveResult(colorRegister, "J")
     }
-    return activeLikeField
+    return ResolvedActivatedLikeTint(activeLikeField, rendererCallIndex)
 }
 
 private fun List<Instruction>.resolveBooleanNormalizationValue(
@@ -2922,7 +2918,7 @@ private fun MutableMethod.injectDynamicPalette(
     allocation: PaletteAllocation,
     kind: PaletteKind,
     paletteDescriptor: String,
-    constructorReference: String,
+    constructorContract: PaletteConstructorContract,
 ) {
     val originalAllocation = instructions.getOrNull(allocation.index)
         ?: throw PatchException(
@@ -2942,7 +2938,7 @@ private fun MutableMethod.injectDynamicPalette(
         )
     }
 
-    val nativeConstructor = resolvePaletteConstructor(allocation, constructorReference)
+    val nativeConstructor = resolvePaletteConstructor(allocation, constructorContract)
     if (!kind.isLight) {
         // Both dark factories own the same background family. The DIM palette stays reachable
         // from the app's own "dim" appearance paths, so the chooser must cover it too; otherwise
@@ -2969,7 +2965,7 @@ private fun MutableMethod.injectDynamicPalette(
         index = allocation.index,
         relocateBranchTargets = true,
     ) {
-        emitDynamicPaletteGuard(kind, paletteDescriptor, constructorReference)
+        emitDynamicPaletteGuard(kind, paletteDescriptor, constructorContract.primaryReference)
     }
 }
 
@@ -3039,6 +3035,15 @@ private fun MutableMethod.injectDarkBackgrounds(constructor: PaletteConstructor)
     val constructorRegisters =
         (constructor.instruction.startRegister until
             constructor.instruction.startRegister + constructor.instruction.registerCount).toList()
+    if (constructor.usesDefaultArguments &&
+        (CONTRAST_BACKGROUND_COLORS[7] != CONTRAST_BACKGROUND_COLORS[15] ||
+            DIM_BACKGROUND_COLORS[7] != DIM_BACKGROUND_COLORS[15])
+    ) {
+        throw PatchException(
+            "NewX default palette constructor aliases background token 15 to token 7, " +
+                "but the configured surfaces differ: $this",
+        )
+    }
     insertHook(
         index = constructor.index,
         excludedRegisters = constructorRegisters,

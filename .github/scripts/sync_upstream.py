@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 # Upstream workflows, agent instructions, and KR distribution metadata stay locally owned.
 SOURCE_PATHS = ["patches", "extensions", "gradle", "build.gradle.kts", "settings.gradle.kts",
                 "gradlew", "gradlew.bat", "patch-twitter.sh", "patches-list.json",
-                ".gitignore", ".gitattributes", "LICENSE", "NOTICE", "CHANGELOG.md"]
+                "scripts/baseline_profile_rules.py", ".gitignore", ".gitattributes",
+                "LICENSE", "NOTICE", "CHANGELOG.md"]
 
 
 def git(root, *args, data=None, check=True):

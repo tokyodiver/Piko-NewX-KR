@@ -39,6 +39,10 @@ public final class TimelineScrollPositionStore {
     private static boolean hasLastAnchor;
     private static String stagedEntryId;
     private static long stagedSortIndex;
+    private static boolean hasAnchorSearch;
+    private static int anchorSearchListSize;
+    private static long anchorSearchSortIndex;
+    private static boolean anchorSearchExact;
     private static final ConcurrentHashMap<String, PendingAnchor> pendingAnchors =
             new ConcurrentHashMap<>();
 
@@ -184,7 +188,6 @@ public final class TimelineScrollPositionStore {
             long sortIndex,
             int itemIndex
     ) {
-        boolean loggingEnabled = NewXLogger.isLoggingEnabled();
         String timelineName = timeline == null ? null : timeline.name();
         if (accountId <= 0) return;
         lastAccountId = accountId;
@@ -224,7 +227,7 @@ public final class TimelineScrollPositionStore {
                 hasLastAnchor = true;
             }
 
-            if (loggingEnabled) {
+            if (NewXLogger.isLoggingEnabled()) {
                 String detail = entryId == null
                         ? "reason=no-anchor"
                         : "entryId=" + entryId + " sortIndex=" + sortIndex + " itemIndex=" + itemIndex;
@@ -260,6 +263,17 @@ public final class TimelineScrollPositionStore {
         return pending == null ? 0L : pending.sortIndex;
     }
 
+    /**
+     * Records the restore hook's list search right before {@link #consumeAnchor}: the loaded item
+     * count, the matched row's current sort index, and whether entry id and sort index both matched.
+     */
+    public static void recordAnchorSearch(int listSize, long foundSortIndex, boolean exact) {
+        anchorSearchListSize = listSize;
+        anchorSearchSortIndex = foundSortIndex;
+        anchorSearchExact = exact;
+        hasAnchorSearch = true;
+    }
+
     @Nullable
     public static int[] consumeAnchor(
             Enum<?> timeline,
@@ -270,6 +284,8 @@ public final class TimelineScrollPositionStore {
         String timelineName = timeline == null ? null : timeline.name();
         String key = pendingAnchorKey(timeline, profileId, accountId);
         if (key == null) return null;
+        boolean searched = hasAnchorSearch;
+        hasAnchorSearch = false;
         PendingAnchor pending = pendingAnchors.remove(key);
         if (pending == null) return null;
 
@@ -278,16 +294,24 @@ public final class TimelineScrollPositionStore {
             if (loggingEnabled) {
                 NewXLogger.logger("NewX anchor timeline=" + timelineName + " account=" + accountId
                         + " found=" + foundItemIndex + " savedItem=" + pending.itemIndex
-                        + " savedIndex=" + pending.savedIndex + " reason=post-gone -> top");
+                        + " savedIndex=" + pending.savedIndex
+                        + " items=" + (searched ? anchorSearchListSize : -1)
+                        + " entryId=" + pending.entryId + " reason=post-gone -> top");
             }
             return new int[]{0, 0};
         }
 
+        // An entry-id-only match carries the row's current sort index; the scroll key needs it.
+        long sortIndex = searched ? anchorSearchSortIndex : pending.sortIndex;
         stagedEntryId = pending.entryId;
-        stagedSortIndex = pending.sortIndex;
+        stagedSortIndex = sortIndex;
         if (loggingEnabled) {
+            String match = !searched || anchorSearchExact
+                    ? "exact"
+                    : "entry-id sortIndex=" + pending.sortIndex + "->" + sortIndex;
             NewXLogger.logger("NewX anchor timeline=" + timelineName + " account=" + accountId
                     + " found=" + foundItemIndex + " savedItem=" + pending.itemIndex
+                    + " items=" + (searched ? anchorSearchListSize : -1) + " match=" + match
                     + " -> relocate-by-key entryId=" + pending.entryId);
         }
         // Returning the restored position makes X call requestScrollToItem, which forces the remeasure
@@ -385,10 +409,9 @@ public final class TimelineScrollPositionStore {
             int index,
             int offset
     ) {
-        boolean loggingEnabled = NewXLogger.isLoggingEnabled();
         String timelineName = timeline == null ? null : timeline.name();
         if (accountId <= 0) {
-            if (loggingEnabled) {
+            if (NewXLogger.isLoggingEnabled()) {
                 NewXLogger.logger("NewX save skip timeline=" + timelineName + " account=" + accountId
                         + " reason=no-account");
             }
@@ -397,7 +420,7 @@ public final class TimelineScrollPositionStore {
         lastAccountId = accountId;
 
         if (index < 0 || offset < 0) {
-            if (loggingEnabled) {
+            if (NewXLogger.isLoggingEnabled()) {
                 NewXLogger.logger("NewX save skip timeline=" + timelineName + " account=" + accountId
                         + " reason=negative-position");
             }
@@ -440,7 +463,7 @@ public final class TimelineScrollPositionStore {
                 lastSavedOffset = offset;
             }
 
-            if (loggingEnabled) {
+            if (NewXLogger.isLoggingEnabled()) {
                 NewXLogger.logger("NewX save timeline=" + timelineName + " account=" + accountId + " key=" + key
                         + " index=" + index + " offset=" + offset);
             }

@@ -110,12 +110,6 @@ private data class NavigationInsetsHook(
     val continuation: Instruction,
 )
 
-private data class PhotoViewerNavigationFallbackHook(
-    val method: MutableMethod,
-    val gateIndex: Int,
-    val fallback: Instruction,
-)
-
 internal data class ImmersiveActionBarSafeAreaHook(
     val method: MutableMethod,
     val actionBarCallIndex: Int,
@@ -239,16 +233,6 @@ private fun Method.isPostDetailReplyBarRenderer(): Boolean {
     return parameters.count { it == COMPOSER_DESCRIPTOR } == 1 &&
         parameters.count { it == "Ljava/lang/String;" } == 1 &&
         parameters.any { it.startsWith(HAZE_SCOPE) }
-}
-
-private fun Method.isPhotoViewerControlsRenderer(): Boolean {
-    // The caller edge to the resolved container supplies the domain anchor. Auxiliary Compose
-    // parameters are not consumed by this hook; their count and order cannot identify the UI.
-    // The resolver below additionally proves call order and a common native fallback target.
-    return AccessFlags.STATIC.isSet(accessFlags) &&
-        returnType == "V" &&
-        inlineActionBarRenderCallIndices().size == 1 &&
-        navigationInsetsCallIndices().size == 1
 }
 
 private fun Method.inlineActionBarRenderCallIndices(): List<Int> =
@@ -715,6 +699,31 @@ private class ReplyControlFlow(val method: Method) {
     }
 }
 
+private fun ReplyControlFlow.parameterRegister(parameterIndex: Int): Int? {
+    if (parameterIndex !in method.parameterTypes.indices) return null
+    var register = parameterStart + if (AccessFlags.STATIC.isSet(method.accessFlags)) 0 else 1
+    method.parameterTypes.take(parameterIndex).forEach { parameter ->
+        register += if (parameter.toString() in setOf("J", "D")) 2 else 1
+    }
+    return register
+}
+
+private fun ReplyControlFlow.parameterIndexForRegister(register: Int): Int? = requireAtMostOne(
+    "NewX reply parameter for v$register in $method",
+    method.parameterTypes.indices.filter { parameterRegister(it) == register },
+)
+
+private fun Instruction.invokedArgumentRegister(
+    reference: MethodReference,
+    parameterIndex: Int,
+): Int? {
+    val receiverCount = if (opcode == Opcode.INVOKE_STATIC || opcode == Opcode.INVOKE_STATIC_RANGE) 0 else 1
+    val argumentIndex = receiverCount + reference.parameterTypes.take(parameterIndex).sumOf { parameter ->
+        if (parameter.toString() in setOf("J", "D")) 2 else 1
+    }
+    return registersUsed.getOrNull(argumentIndex)
+}
+
 /** Only the constructed instance's selected arm may anchor an animated composer. */
 private fun ReplyControlFlow.allocatedContentCallsComposer(
     allocationIndex: Int,
@@ -732,9 +741,6 @@ private fun ReplyControlFlow.allocatedContentCallsComposer(
                 !AccessFlags.STATIC.isSet(method.accessFlags)
         },
     )
-    if (entry.callSiteIndices(minimalContainer).isEmpty()) {
-        throw PatchException("NewX reply content $type delegates its composer through an unproven helper: $entry")
-    }
     val constructorIndex = requireExactlyOne(
         "NewX reply content constructor for allocation $allocationIndex in $method",
         instructions.indices.filter { index ->
@@ -807,15 +813,100 @@ private fun ReplyControlFlow.allocatedContentCallsComposer(
         }
     })
     if (!dispatchProven) throw PatchException("NewX reply content first dispatch is not a proven scalar capture: $entry")
-    val calls = entry.callSiteIndices(minimalContainer).filter { it in selected }
-    if (calls.isEmpty()) return false
-    requireExactlyOne("NewX selected reply content composer call in $entry", calls)
-    if (selected.none { index ->
-            val instruction = entryFlow.instructions[index]
+    val directCalls = entry.callSiteIndices(minimalContainer).filter { it in selected }
+    val (composerProofFlow, composerProofIndexes, composerCalls) = if (directCalls.isNotEmpty()) {
+        Triple(entryFlow, selected, directCalls)
+    } else {
+        val helperRoutes = selected.mapNotNull { helperCallIndex ->
+            val instruction = entryFlow.instructions[helperCallIndex]
+            val reference = instruction.getReference<MethodReference>() ?: return@mapNotNull null
+            if (instruction.opcode !in setOf(Opcode.INVOKE_DIRECT, Opcode.INVOKE_DIRECT_RANGE) ||
+                reference.definingClass != type || reference.name == "<init>" ||
+                entryFlow.origin(helperCallIndex, instruction.registersUsed.firstOrNull() ?: return@mapNotNull null) !=
+                    -entryFlow.parameterStart - 1
+            ) return@mapNotNull null
+            val helper = requireExactlyOne(
+                "NewX reply content helper $reference",
+                definition.methods.filter { reference.matches(it) },
+            )
+            val calls = helper.callSiteIndices(minimalContainer)
+            if (calls.isEmpty()) return@mapNotNull null
+            val helperFlow = ReplyControlFlow(helper)
+            val composerCall = requireExactlyOne("NewX helper reply composer call in $helper", calls)
+            val composerReference = helperFlow.instructions[composerCall].getReference<MethodReference>()
+                ?: throw PatchException("NewX helper reply composer call has no reference: $helper")
+            val composerParameter = requireExactlyOne(
+                "NewX helper Composer parameter in $helper",
+                composerReference.parameterTypes.indices.filter {
+                    composerReference.parameterTypes[it].toString() == COMPOSER_DESCRIPTOR
+                },
+            )
+            val composerRegister = helperFlow.instructions[composerCall]
+                .invokedArgumentRegister(composerReference, composerParameter)
+                ?: throw PatchException("NewX helper reply composer register is unavailable: $helper")
+            val helperComposerOrigin = helperFlow.origin(composerCall, composerRegister)
+                ?: throw PatchException("Unproven NewX helper Composer origin in $helper")
+            if (helperComposerOrigin >= 0) {
+                throw PatchException(
+                    "NewX reply composer is not forwarded from a helper parameter: $helper " +
+                        "(register=v$composerRegister, origin=$helperComposerOrigin)",
+                )
+            }
+            val helperParameterIndex = helperFlow.parameterIndexForRegister(-helperComposerOrigin - 1)
+                ?: throw PatchException("NewX helper Composer source is not a parameter in $helper")
+            // Function3 composable callbacks are (AnimatedVisibilityScope, Composer, changed).
+            if (entry.parameterTypes.size != 3) {
+                throw PatchException("Unexpected NewX Function3 composer forwarding shape: $entry -> $helper")
+            }
+            val forwardedRegister = instruction.invokedArgumentRegister(reference, helperParameterIndex)
+                ?: throw PatchException("NewX reply helper Composer argument is unavailable: $entry")
+            val entryComposerRegister = entryFlow.parameterRegister(1)
+                ?: throw PatchException("NewX reply Function3 Composer parameter is unavailable: $entry")
+            if (entryFlow.origin(helperCallIndex, forwardedRegister) != -entryComposerRegister - 1) {
+                throw PatchException("NewX reply helper does not forward the Function3 Composer in $entry")
+            }
+            if (entryFlow.instructions.getOrNull(helperCallIndex + 1)?.opcode != Opcode.MOVE_RESULT_OBJECT ||
+                selected.none { returnIndex ->
+                    val returned = entryFlow.instructions[returnIndex]
+                    returned.opcode == Opcode.RETURN_OBJECT &&
+                        entryFlow.origin(returnIndex, (returned as OneRegisterInstruction).registerA) == helperCallIndex + 1
+                }
+            ) throw PatchException("NewX reply content helper result is not returned by $entry")
+            Triple(helperFlow, helperFlow.reachable(), calls)
+        }
+        val selectedHelperCalls = selected.filter { helperCallIndex ->
+            val instruction = entryFlow.instructions[helperCallIndex]
+            val reference = instruction.getReference<MethodReference>() ?: return@filter false
+            instruction.opcode in setOf(Opcode.INVOKE_DIRECT, Opcode.INVOKE_DIRECT_RANGE) &&
+                reference.definingClass == type && reference.name != "<init>"
+        }
+        if (helperRoutes.isEmpty()) {
+            if (selectedHelperCalls.isEmpty()) return false
+            val candidates = selected.mapNotNull { index ->
+                val instruction = entryFlow.instructions[index]
+                val reference = instruction.getReference<MethodReference>() ?: return@mapNotNull null
+                if (instruction.opcode !in setOf(Opcode.INVOKE_DIRECT, Opcode.INVOKE_DIRECT_RANGE)) return@mapNotNull null
+                "$index $reference registers=${instruction.registersUsed} " +
+                    "receiverOrigin=${entryFlow.origin(index, instruction.registersUsed.first())} expected=${-entryFlow.parameterStart - 1}"
+            }
+            throw PatchException("No valid selected NewX reply helper route in $entry: candidates=$candidates")
+        }
+        val helperRoute = requireExactlyOne(
+            "NewX selected reply content composer helper in $entry",
+            helperRoutes,
+        )
+        helperRoute
+    }
+    requireExactlyOne(
+        "NewX selected reply content composer call in ${composerProofFlow.method}",
+        composerCalls,
+    )
+    if (composerProofIndexes.none { index ->
+            val instruction = composerProofFlow.instructions[index]
             instruction.opcode == Opcode.CHECK_CAST && instruction.getReference<TypeReference>()?.type ==
                 "Landroidx/compose/animation/AnimatedVisibilityScope;"
         }
-    ) throw PatchException("NewX reply content is not an AnimatedVisibility scope: $entry")
+    ) throw PatchException("NewX reply content is not an AnimatedVisibility scope: ${composerProofFlow.method}")
 
     val wrapperIndex = requireExactlyOne(
         "NewX reply content Compose wrapper in $method",
@@ -1069,16 +1160,123 @@ private fun ToggleSettingDefinition.injectReadBeforeActionBar(hook: ImmersiveAct
     )
 }
 
+private val NAVIGATION_BARS_INSET_NAMES = setOf("navigationBars", "navigationBarsIgnoringVisibility")
+
 /**
- * The photo viewer chooses between the reply composer and a native navigation-bar spacer after
- * rendering its action bar. Resolve the existing no-composer branch from call order and control
- * flow so the hide setting can select it without recreating Compose inset behavior.
+ * 12.40.1 shape: the media row renderer emits its action row, then calls a separate bottom slot.
+ * The slot sizes itself from the navigation-bar inset before choosing between the playback bar and
+ * the animated reply composer. Because that inset read lies on every path from the slot's entry to
+ * the composer anchor, the slot keeps the gesture area reserved when the hidden composer draws
+ * nothing, so the action row needs no extra padding. Returns false for any other shape.
  */
 context(context: BytecodePatchContext)
-private fun resolvePhotoViewerNavigationFallbackHook(
+private fun mediaBottomSlotReservesNavigationInset(minimalContainer: Method): Boolean {
+    val rowRenderer = requireAtMostOne(
+        label = "NewX media inline-action row renderer (bottom-slot reply shape)",
+        candidates = buildList<Method> {
+            context.classDefForEach { classDef ->
+                if (!classDef.type.startsWith(MEDIA_SCOPE)) return@classDefForEach
+                classDef.methods.forEach { method ->
+                    if (method.inlineActionBarRenderCallIndices().isNotEmpty()) add(method)
+                }
+            }
+        },
+    ) ?: return false
+    val rowCallIndex = requireExactlyOne(
+        "NewX media bottom-slot inline action-bar call in $rowRenderer",
+        rowRenderer.inlineActionBarRenderCallIndices(),
+    )
+    val rowInstructions = rowRenderer.implementation?.instructions?.toList() ?: return false
+    val slotCandidates = rowInstructions.withIndex().drop(rowCallIndex + 1).mapNotNull { (_, instruction) ->
+        if (!instruction.isStaticInvocation()) return@mapNotNull null
+        val reference = instruction.getReference<MethodReference>() ?: return@mapNotNull null
+        if (!reference.definingClass.startsWith(MEDIA_SCOPE)) return@mapNotNull null
+        val slot = requireAtMostOne(
+            "NewX media bottom-slot callee $reference",
+            context.classDefByOrNull(reference.definingClass)?.methods?.filter { reference.matches(it) }.orEmpty(),
+        ) ?: return@mapNotNull null
+        slot.takeIf { it.replyComposerAnchorIndices(minimalContainer) { type -> context.classDefByOrNull(type) }.isNotEmpty() }
+    }.distinctBy { it.toString() }
+    val slot = requireAtMostOne("NewX media reply bottom slot after the action row in $rowRenderer", slotCandidates)
+        ?: return false
+    val anchor = requireExactlyOne(
+        "NewX media bottom-slot reply-composer anchor in $slot",
+        slot.replyComposerAnchorIndices(minimalContainer) { type -> context.classDefByOrNull(type) },
+    )
+    val instructions = slot.implementation!!.instructions.toList()
+    val navigationReads = instructions.indices.filter { index ->
+        val read = instructions[index]
+        if (read.opcode != Opcode.IGET_OBJECT) return@filter false
+        val field = read.getReference<FieldReference>() ?: return@filter false
+        val holder = (read as TwoRegisterInstruction).registerB
+        // The holder comes from the framework's Composer-scoped WindowInsetsHolder accessor.
+        val provider = (0 until index).lastOrNull { candidate ->
+            val result = instructions.getOrNull(candidate + 1) as? OneRegisterInstruction
+            instructions[candidate].isStaticInvocation() &&
+                result?.opcode == Opcode.MOVE_RESULT_OBJECT && result.registerA == holder
+        }?.let { instructions[it].getReference<MethodReference>() } ?: return@filter false
+        field.definingClass == provider.returnType &&
+            provider.definingClass.startsWith(FOUNDATION_LAYOUT_SCOPE) &&
+            provider.parameterTypes.map(CharSequence::toString) == listOf(COMPOSER_DESCRIPTOR) &&
+            ReplyControlFlow(slot).origin(index, holder)?.let { origin ->
+                origin >= 0 && instructions[origin].opcode == Opcode.MOVE_RESULT_OBJECT &&
+                    instructions[origin - 1].getReference<MethodReference>() == provider
+            } == true &&
+            field.isNamedWindowInset(NAVIGATION_BARS_INSET_NAMES)
+    }
+    val navigationRead = requireAtMostOne("NewX media bottom-slot navigation-bars inset read in $slot", navigationReads)
+        ?: return false
+    val flow = ReplyControlFlow(slot)
+    return navigationRead in flow.reachable() && anchor !in flow.reachable(skip = navigationRead)
+}
+
+/** The WindowInsetsHolder constructor builds each inset field from a call that names it. */
+context(context: BytecodePatchContext)
+private fun FieldReference.isNamedWindowInset(names: Set<String>): Boolean {
+    val constructor = requireAtMostOne(
+        "NewX WindowInsetsHolder constructor $definingClass",
+        context.classDefByOrNull(definingClass)?.methods?.filter { method ->
+            method.name == "<init>" && method.implementation != null
+        }.orEmpty(),
+    ) ?: return false
+    val code = constructor.implementation!!.instructions.toList()
+    val flow = runCatching { ReplyControlFlow(constructor) }.getOrNull() ?: return false
+    val writes = code.indices.filter { index ->
+        code[index].opcode == Opcode.IPUT_OBJECT &&
+            code[index].getReference<FieldReference>()?.let {
+                it.definingClass == definingClass && it.name == name && it.type == type
+            } == true
+    }
+    val write = requireAtMostOne("NewX WindowInsetsHolder write of $this", writes) ?: return false
+    val valueOrigin = flow.origin(write, (code[write] as TwoRegisterInstruction).registerA)?.takeIf { it >= 0 }
+        ?: return false
+    // The value is either a call result or an allocation initialized by a direct constructor.
+    val producer = when (code[valueOrigin].opcode) {
+        Opcode.MOVE_RESULT_OBJECT -> valueOrigin - 1
+        Opcode.NEW_INSTANCE -> (valueOrigin + 1 until write).singleOrNull { index ->
+            code[index].opcode in setOf(Opcode.INVOKE_DIRECT, Opcode.INVOKE_DIRECT_RANGE) &&
+                code[index].getReference<MethodReference>()?.name == "<init>" &&
+                code[index].registersUsed.firstOrNull()?.let { flow.origin(index, it) } == valueOrigin
+        } ?: return false
+        else -> return false
+    }
+    return code[producer].registersUsed.any { register ->
+        flow.origin(producer, register)?.takeIf { it >= 0 }?.let { origin ->
+            code[origin].getReference<StringReference>()?.string
+        } in names
+    }
+}
+
+/**
+ * Proves the immersive-only reply shape: no media method calls the minimal reply container
+ * directly, and the immersive safe-area renderer is the sole media-scope inline-action row render,
+ * so every media action row stays covered. Any other shape fails closed.
+ */
+context(context: BytecodePatchContext)
+private fun requireImmersiveOnlyPhotoViewerReply(
     minimalContainer: MutableMethod,
     immersiveHook: ImmersiveActionBarSafeAreaHook?,
-): PhotoViewerNavigationFallbackHook? {
+) {
     val directCallers = buildList<Method> {
         context.classDefForEach { classDef ->
             if (!classDef.type.startsWith(MEDIA_SCOPE)) return@classDefForEach
@@ -1087,13 +1285,7 @@ private fun resolvePhotoViewerNavigationFallbackHook(
             }
         }
     }
-    val candidates = directCallers.filter { it.isPhotoViewerControlsRenderer() }
-    // 12.37 renders PHOTO/VIDEO/GIF through the shared immersive chrome; the legacy photo host with
-    // its native-spacer fallback is gone. The photo hook is omitted only when no media method calls
-    // the container directly, the immersive safe-area hook resolved, and that immersive renderer is
-    // the sole media-scope inline-action row render, so every media action row stays covered.
-    // Anything else falls through to the fail-closed diagnostic below.
-    if (candidates.isEmpty() && directCallers.isEmpty() && immersiveHook != null) {
+    if (directCallers.isEmpty() && immersiveHook != null) {
         val mediaRowRenderers = buildList<Method> {
             context.classDefForEach { classDef ->
                 if (!classDef.type.startsWith(MEDIA_SCOPE)) return@classDefForEach
@@ -1106,101 +1298,24 @@ private fun resolvePhotoViewerNavigationFallbackHook(
             label = "NewX media inline-action row renderer (immersive-only reply shape)",
             candidates = mediaRowRenderers,
         )
-        if (onlyRowRenderer != null && immersiveHook.method.matches(onlyRowRenderer)) return null
+        if (onlyRowRenderer != null && immersiveHook.method.matches(onlyRowRenderer)) return
     }
-    val missingCapability = if (candidates.isEmpty()) {
-        val containerCallers = mutableListOf<String>()
-        val actionRowConsumers = mutableListOf<String>()
-        context.classDefForEach { definition ->
-            definition.methods.forEach { method ->
-                val composerCalls = method.callSiteIndices(minimalContainer)
-                if (composerCalls.isNotEmpty()) containerCallers.add("$method at $composerCalls")
-                val rowCalls = method.inlineActionBarRenderCallIndices()
-                if (rowCalls.isNotEmpty()) actionRowConsumers.add("$method at $rowCalls")
-            }
+    if (directCallers.isEmpty() && immersiveHook == null && mediaBottomSlotReservesNavigationInset(minimalContainer)) return
+    val containerCallers = mutableListOf<String>()
+    val actionRowConsumers = mutableListOf<String>()
+    context.classDefForEach { definition ->
+        definition.methods.forEach { method ->
+            val composerCalls = method.callSiteIndices(minimalContainer)
+            if (composerCalls.isNotEmpty()) containerCallers.add("$method at $composerCalls")
+            val rowCalls = method.inlineActionBarRenderCallIndices()
+            if (rowCalls.isNotEmpty()) actionRowConsumers.add("$method at $rowCalls")
         }
-        "NewX media reply-bar capability is not proven: no direct photo/native-navigation-fallback " +
-            "renderer for $minimalContainer. Direct media callers: $directCallers. " +
+    }
+    throw PatchException(
+        "NewX media reply-bar capability is not proven for $minimalContainer. " +
+            "Direct media callers: $directCallers. " +
             "Selected immersive safe-area renderer: ${immersiveHook?.method ?: "absent"}. " +
-            "All direct container callers: $containerCallers. All action-row consumers: $actionRowConsumers. " +
-            "A selected animated content path proves its own immersive hook, not removal of the " +
-            "legacy photo surface or closed coverage of media action-row consumption. " +
-            "The historical compact composer has no native spacer and cannot replace that contract. " +
-            "Refusing to omit the required photo hook"
-    } else {
-        "NewX photo-viewer controls renderer with native navigation fallback"
-    }
-    val originalMethod =
-        requireExactlyOne(
-            label = missingCapability,
-            candidates = candidates,
-        )
-    val method =
-        requireExactlyOne(
-            label = "NewX mutable photo-viewer controls renderer",
-            candidates =
-                context.mutableClassDefBy(originalMethod.definingClass).methods.filter { method ->
-                    method.matches(originalMethod)
-                },
-        )
-    val instructions = method.instructions.toList()
-    val actionBarCalls = method.inlineActionBarRenderCallIndices()
-    val minimalComposerCalls = method.callSiteIndices(minimalContainer)
-    val navigationInsetCalls = method.navigationInsetsCallIndices()
-    val actionBarCall =
-        requireExactlyOne(
-            label = "NewX photo-viewer action-bar call in $method",
-            candidates = actionBarCalls,
-        )
-    val minimalComposerCall =
-        requireExactlyOne(
-            label = "NewX photo-viewer reply-composer call in $method",
-            candidates = minimalComposerCalls,
-        )
-    val navigationInsetCall =
-        requireExactlyOne(
-            label = "NewX photo-viewer navigation-inset call in $method",
-            candidates = navigationInsetCalls,
-        )
-    if (!(actionBarCall < minimalComposerCall && minimalComposerCall < navigationInsetCall)) {
-        throw PatchException(
-            "Unexpected photo-viewer control-flow order in $method: action bar at $actionBarCall, " +
-                "reply composer at $minimalComposerCall, navigation inset at $navigationInsetCall",
-        )
-    }
-
-    val fallbackBranches =
-        (actionBarCall + 1 until minimalComposerCall).mapNotNull { index ->
-            val instruction = instructions[index]
-            if (instruction.opcode !in CONDITIONAL_BRANCH_OPCODES) return@mapNotNull null
-            val branch = instruction as? BuilderOffsetInstruction
-                ?: throw PatchException(
-                    "Photo-viewer conditional branch is not mutable at $index in $method: " +
-                        instruction,
-                )
-            val target = branch.target.location.instruction ?: return@mapNotNull null
-            val targetIndex = branch.target.location.index
-            Triple(index, targetIndex, target).takeIf {
-                targetIndex in (minimalComposerCall + 1)..navigationInsetCall
-            }
-        }
-    val fallbackTargets = fallbackBranches.distinctBy { (_, targetIndex, _) -> targetIndex }
-    if (fallbackBranches.isEmpty()) {
-        throw PatchException(
-            "Expected at least one photo-viewer reply gate in $method, found none",
-        )
-    }
-    val fallbackTarget =
-        requireExactlyOne(
-            label = "NewX photo-viewer navigation fallback target in $method",
-            candidates = fallbackTargets,
-        )
-
-    return PhotoViewerNavigationFallbackHook(
-        method = method,
-        // newx-resolver-lint: allow instruction-order raw-first because bytecode order is the contract.
-        gateIndex = fallbackBranches.minOf { (index, _, _) -> index },
-        fallback = fallbackTarget.third,
+            "All direct container callers: $containerCallers. All action-row consumers: $actionRowConsumers",
     )
 }
 
@@ -1230,8 +1345,7 @@ val newXHidePostReplyBarPatch =
                 resolvePostDetailNavigationInsetsHook(postDetailSheetContainer)
             val immersiveActionBarSafeAreaHook =
                 resolveImmersiveActionBarSafeAreaHook(minimalContainer)
-            val photoViewerNavigationFallbackHook =
-                resolvePhotoViewerNavigationFallbackHook(minimalContainer, immersiveActionBarSafeAreaHook)
+            requireImmersiveOnlyPhotoViewerReply(minimalContainer, immersiveActionBarSafeAreaHook)
 
             val postDetailInsetApplication =
                 postDetailSheetContainer.classifyInsetApplication(postDetailNavigationInsetsHook.callIndex)
@@ -1252,9 +1366,6 @@ val newXHidePostReplyBarPatch =
                     postDetailNavigationInsetsHook.continuation,
                 )
                 hidePostReplyBar.returnVoidIfEnabled(postDetailSheetContainer, 0)
-            }
-            photoViewerNavigationFallbackHook?.let { hook ->
-                hidePostReplyBar.branchIfEnabled(hook.method, hook.gateIndex, hook.fallback)
             }
             immersiveActionBarSafeAreaHook?.let { hook ->
                 // 12.29's new immersive renderer owns the visible likes/repost/share row. Pad that

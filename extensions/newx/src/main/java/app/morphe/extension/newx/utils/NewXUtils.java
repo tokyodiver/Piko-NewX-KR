@@ -25,6 +25,9 @@ import app.morphe.extension.shared.Utils;
  */
 public final class NewXUtils {
     private static WeakReference<Activity> resumedActivity = new WeakReference<>(null);
+    // A visible activity can be left without a resumed peer, e.g. after returning from a
+    // deeplinked MainActivity instance, so the last started activity backs up the resumed one.
+    private static WeakReference<Activity> startedActivity = new WeakReference<>(null);
     private static boolean lifecycleCallbacksRegistered;
     // Presenter shapes are fixed per class; cache the accessible field walk so
     // share/options lookups pay reflection once instead of per invocation.
@@ -47,11 +50,13 @@ public final class NewXUtils {
 
             @Override
             public void onActivityStarted(Activity activity) {
+                startedActivity = new WeakReference<>(activity);
             }
 
             @Override
             public void onActivityResumed(Activity activity) {
                 resumedActivity = new WeakReference<>(activity);
+                startedActivity = new WeakReference<>(activity);
             }
 
             @Override
@@ -61,6 +66,7 @@ public final class NewXUtils {
 
             @Override
             public void onActivityStopped(Activity activity) {
+                if (startedActivity.get() == activity) startedActivity.clear();
             }
 
             @Override
@@ -70,6 +76,7 @@ public final class NewXUtils {
             @Override
             public void onActivityDestroyed(Activity activity) {
                 clearActivity(activity);
+                if (startedActivity.get() == activity) startedActivity.clear();
             }
         });
         lifecycleCallbacksRegistered = true;
@@ -91,7 +98,21 @@ public final class NewXUtils {
         if (isUsable(activity)) return activity;
 
         activity = resumedActivity.get();
+        if (isUsable(activity)) return activity;
+
+        activity = startedActivity.get();
         return isUsable(activity) ? activity : null;
+    }
+
+    /** Lifecycle bookkeeping summary for diagnosing a failed activity lookup. */
+    public static String describeTrackedActivities() {
+        return "resumed=" + describe(resumedActivity.get()) + " started=" + describe(startedActivity.get());
+    }
+
+    private static String describe(Activity activity) {
+        if (activity == null) return "null";
+        return activity.getClass().getSimpleName() + "@" + Integer.toHexString(System.identityHashCode(activity))
+                + (activity.isFinishing() ? "[finishing]" : "") + (activity.isDestroyed() ? "[destroyed]" : "");
     }
 
     public static PresenterData findPresenterData(Object presenter, String valueTypeName)
@@ -178,40 +199,52 @@ public final class NewXUtils {
 
     public static Object invoke(Object target, String methodName) throws ReflectiveOperationException {
         if (target == null || methodName == null) return null;
-        return lookupMethod(target.getClass(), methodName).invoke(target);
+        Method method = lookupMethod(target.getClass(), methodName).method;
+        if (method == null) {
+            // Preserve strict lookup's original exception type and message.
+            return target.getClass().getMethod(methodName).invoke(target);
+        }
+        return method.invoke(target);
     }
 
-    private static final ConcurrentHashMap<MethodKey, Method> METHOD_CACHE =
+    private static final ConcurrentHashMap<Class<?>, ConcurrentHashMap<String, MethodResolution>> METHOD_CACHE =
             new ConcurrentHashMap<>();
 
-    private static final class MethodKey {
-        private final Class<?> owner;
-        private final String name;
+    private static final class MethodResolution {
+        private static final MethodResolution ABSENT = new MethodResolution(null);
 
-        private MethodKey(Class<?> owner, String name) {
-            this.owner = owner;
-            this.name = name;
-        }
+        private final Method method;
 
-        @Override public boolean equals(Object other) {
-            if (!(other instanceof MethodKey key)) return false;
-            return owner == key.owner && name.equals(key.name);
-        }
-
-        @Override public int hashCode() {
-            return owner.hashCode() * 31 + name.hashCode();
+        private MethodResolution(Method method) {
+            this.method = method;
         }
     }
 
-    private static Method lookupMethod(Class<?> owner, String name)
+    private static MethodResolution lookupMethod(Class<?> owner, String name)
             throws ReflectiveOperationException {
-        MethodKey key = new MethodKey(owner, name);
-        Method cached = METHOD_CACHE.get(key);
+        ConcurrentHashMap<String, MethodResolution> ownerCache = METHOD_CACHE.get(owner);
+        if (ownerCache == null) {
+            ConcurrentHashMap<String, MethodResolution> newCache = new ConcurrentHashMap<>();
+            ConcurrentHashMap<String, MethodResolution> raced = METHOD_CACHE.putIfAbsent(owner, newCache);
+            ownerCache = raced != null ? raced : newCache;
+        }
+
+        MethodResolution cached = ownerCache.get(name);
         if (cached != null) return cached;
-        // getMethod walks the hierarchy under a lock; cache per class-shape.
-        Method resolved = owner.getMethod(name);
-        Method raced = METHOD_CACHE.putIfAbsent(key, resolved);
-        return raced != null ? raced : resolved;
+
+        // getMethod walks the hierarchy under a lock; cache each class shape, including misses.
+        synchronized (ownerCache) {
+            cached = ownerCache.get(name);
+            if (cached != null) return cached;
+            try {
+                MethodResolution resolved = new MethodResolution(owner.getMethod(name));
+                ownerCache.put(name, resolved);
+                return resolved;
+            } catch (NoSuchMethodException ignored) {
+                ownerCache.put(name, MethodResolution.ABSENT);
+                return MethodResolution.ABSENT;
+            }
+        }
     }
 
     public static final class PresenterData {
@@ -235,7 +268,8 @@ public final class NewXUtils {
     public static Object invokeIfPresent(Object target, String methodName) {
         if (target == null || methodName == null) return null;
         try {
-            return invoke(target, methodName);
+            Method method = lookupMethod(target.getClass(), methodName).method;
+            return method == null ? null : method.invoke(target);
         } catch (Exception ignored) {
             return null;
         }
@@ -297,6 +331,41 @@ public final class NewXUtils {
         if (postId != null) return postId;
 
         return ToStringParser.fieldValue(postText, "id");
+    }
+
+    /**
+     * Resolves the author ID associated with the media being saved. Reposts and media carrying
+     * source lineage must use the original source account, not the account that reposted it.
+     */
+    public static String rawSourceUserId(Object post) {
+        return rawSourceUserId(postText(post));
+    }
+
+    /** Text form of {@link #rawSourceUserId(Object)} for callers holding a cached model string. */
+    public static String rawSourceUserId(String postText) {
+        String originalPostText = originalRepostedPostText(postText);
+        String originalUserId = rawAuthorUserId(originalPostText);
+        if (originalUserId != null) return originalUserId;
+
+        String sourceUserId = normalizeUserIdentifier(
+                sourceMediaField(postText, "sourceUserIdentifier")
+        );
+        if (sourceUserId != null) return sourceUserId;
+
+        // A source handle without its ID is still better than incorrectly pairing it with the
+        // retweeter's ID. Keep the ID absent and let the filename renderer fall back to the handle.
+        if (originalPostText != null && rawAuthorField(originalPostText, "screenName") != null) {
+            return null;
+        }
+        if (sourceMediaField(postText, "sourcePostIdentifier") != null &&
+                sourceMediaScreenName(postText) != null) {
+            return null;
+        }
+
+        String canonicalUserId = rawAuthorUserId(canonicalPostText(postText));
+        if (canonicalUserId != null) return canonicalUserId;
+
+        return rawAuthorUserId(postText);
     }
 
     /**
@@ -367,6 +436,23 @@ public final class NewXUtils {
 
         String author = ToStringParser.fieldValue(text, "author");
         return author == null ? null : ToStringParser.fieldValue(author, fieldName);
+    }
+
+    private static String rawAuthorUserId(String text) {
+        return normalizeUserIdentifier(rawAuthorField(text, "id"));
+    }
+
+    private static String normalizeUserIdentifier(String value) {
+        if (value == null) return null;
+
+        String candidate = value.trim();
+        if (candidate.matches("[0-9]+")) return candidate;
+
+        String nestedId = ToStringParser.fieldValue(candidate, "id");
+        if (nestedId != null && nestedId.matches("[0-9]+")) return nestedId;
+
+        String nestedValue = ToStringParser.fieldValue(candidate, "value");
+        return nestedValue != null && nestedValue.matches("[0-9]+") ? nestedValue : null;
     }
 
     private static String postText(Object post) {

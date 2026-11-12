@@ -8,6 +8,7 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewOutlineProvider;
 import android.view.ViewGroup;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -107,9 +108,9 @@ public final class ProfilePhotosGallery {
             Object callback,
             Object itemClickCallback,
             float topPaddingDp,
-            float bottomPaddingDp
+            float ignoredBottomPaddingDp
     ) {
-        return new GalleryFactory(items, callback, itemClickCallback, topPaddingDp, bottomPaddingDp);
+        return new GalleryFactory(items, callback, itemClickCallback, topPaddingDp);
     }
 
     public static Function1<Object, Object> createUpdater(
@@ -117,9 +118,9 @@ public final class ProfilePhotosGallery {
             Object callback,
             Object itemClickCallback,
             float topPaddingDp,
-            float bottomPaddingDp
+            float ignoredBottomPaddingDp
     ) {
-        return new GalleryUpdater(items, callback, itemClickCallback, topPaddingDp, bottomPaddingDp);
+        return new GalleryUpdater(items, callback, itemClickCallback, topPaddingDp);
     }
 
     private static final class GalleryFactory implements Function1<Object, Object> {
@@ -127,20 +128,17 @@ public final class ProfilePhotosGallery {
         private final Object callback;
         private final Object itemClickCallback;
         private final float topPaddingDp;
-        private final float bottomPaddingDp;
 
         GalleryFactory(
                 List<?> items,
                 Object callback,
                 Object itemClickCallback,
-                float topPaddingDp,
-                float bottomPaddingDp
+                float topPaddingDp
         ) {
             this.items = items;
             this.callback = callback;
             this.itemClickCallback = itemClickCallback;
             this.topPaddingDp = topPaddingDp;
-            this.bottomPaddingDp = bottomPaddingDp;
         }
 
         @Override
@@ -150,8 +148,7 @@ public final class ProfilePhotosGallery {
                     items,
                     callback,
                     itemClickCallback,
-                    topPaddingDp,
-                    bottomPaddingDp
+                    topPaddingDp
             );
         }
     }
@@ -161,20 +158,17 @@ public final class ProfilePhotosGallery {
         private final Object callback;
         private final Object itemClickCallback;
         private final float topPaddingDp;
-        private final float bottomPaddingDp;
 
         GalleryUpdater(
                 List<?> items,
                 Object callback,
                 Object itemClickCallback,
-                float topPaddingDp,
-                float bottomPaddingDp
+                float topPaddingDp
         ) {
             this.items = items;
             this.callback = callback;
             this.itemClickCallback = itemClickCallback;
             this.topPaddingDp = topPaddingDp;
-            this.bottomPaddingDp = bottomPaddingDp;
         }
 
         @Override
@@ -184,8 +178,7 @@ public final class ProfilePhotosGallery {
                         items,
                         callback,
                         itemClickCallback,
-                        topPaddingDp,
-                        bottomPaddingDp
+                        topPaddingDp
                 );
             }
             // AndroidView ignores the updater result; avoid referencing the host's obfuscated
@@ -217,8 +210,7 @@ public final class ProfilePhotosGallery {
                 List<?> items,
                 Object callback,
                 Object itemClickCallback,
-                float topPaddingDp,
-                float bottomPaddingDp
+                float topPaddingDp
         ) {
             // The target APK retains this constructor shape. It initializes the nested-scrolling
             // helper before enabling nested scrolling in NestedScrollView's constructor.
@@ -228,11 +220,19 @@ public final class ProfilePhotosGallery {
             this.itemClickCallback = itemClickCallback;
             float density = getResources().getDisplayMetrics().density;
             int topPadding = Math.round(Math.max(0f, topPaddingDp) * density);
-            int bottomPadding = Math.round(Math.max(0f, bottomPaddingDp) * density);
-            setPadding(0, topPadding, 0, bottomPadding);
+            // AndroidView is already measured inside the host content area. Applying the
+            // host's bottom content padding again inside this scroller leaves a large blank
+            // band after the Photos grid, so only preserve the top inset here.
+            setPadding(0, topPadding, 0, 0);
             setFillViewport(true);
             setBackgroundColor(Color.TRANSPARENT);
             setClipToPadding(true);
+            // clipToPadding only clips while some padding is non-zero (FLAG_PADDING_NOT_NULL), and
+            // Compose's AndroidViewHolder disables clipChildren. Since 12.41 the host passes a zero
+            // top inset, so rows scrolled past the top drew above this view, over the pinned media
+            // filter row. Clip to the view bounds explicitly; the outline follows size changes.
+            setOutlineProvider(ViewOutlineProvider.BOUNDS);
+            setClipToOutline(true);
             setVerticalScrollBarEnabled(false);
             setHorizontalScrollBarEnabled(false);
             setOnScrollChangeListener((View.OnScrollChangeListener) (view, scrollX, scrollY, oldScrollX, oldScrollY) -> {
@@ -276,8 +276,7 @@ public final class ProfilePhotosGallery {
                 List<?> items,
                 Object callback,
                 Object itemClickCallback,
-                float topPaddingDp,
-                float bottomPaddingDp
+                float topPaddingDp
         ) {
             this.callback = callback;
             this.itemClickCallback = itemClickCallback;
@@ -287,7 +286,7 @@ public final class ProfilePhotosGallery {
                     0,
                     Math.round(Math.max(0f, topPaddingDp) * density),
                     0,
-                    Math.round(Math.max(0f, bottomPaddingDp) * density)
+                    0
             );
             setItems(items);
         }

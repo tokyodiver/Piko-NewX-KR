@@ -34,7 +34,6 @@ import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.ClassDef
 import com.android.tools.smali.dexlib2.iface.Method
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
-import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.NarrowLiteralInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
@@ -74,6 +73,7 @@ private const val FUNCTION3 = "Lkotlin/jvm/functions/Function3;"
 private const val FUNCTION2 = "Lkotlin/jvm/functions/Function2;"
 private const val OBJECT = "Ljava/lang/Object;"
 private const val STRING = "Ljava/lang/String;"
+private val INT_LIKE_PRIMITIVES = setOf("Z", "B", "S", "C", "I")
 private const val JAVA_LIST = "Ljava/util/List;"
 private const val OBJECT_ARRAY = "[Ljava/lang/Object;"
 private const val BOOLEAN = "Ljava/lang/Boolean;"
@@ -750,16 +750,9 @@ private fun isMoveObject(instruction: Instruction): Boolean =
         instruction.opcode == Opcode.MOVE_OBJECT_16
 
 private fun writesRegister(instruction: Instruction, register: Int): Boolean {
-    val destination =
-        when {
-            isMoveObject(instruction) -> (instruction as? TwoRegisterInstruction)?.registerA
-            instruction.opcode == Opcode.IGET_OBJECT -> (instruction as? TwoRegisterInstruction)?.registerA
-            instruction.opcode.name.startsWith("MOVE_RESULT") ||
-                instruction.opcode == Opcode.NEW_INSTANCE ||
-                instruction.opcode.name.startsWith("CONST") -> (instruction as? OneRegisterInstruction)?.registerA
-            else -> null
-        }
-    return destination == register
+    if (!instruction.opcode.setsRegister()) return false
+    val destination = instruction.registersUsed.firstOrNull() ?: return false
+    return destination == register || instruction.opcode.setsWideRegister() && destination + 1 == register
 }
 
 // Reads the destination of a const/4, const/16, or const/high16 instruction.
@@ -908,6 +901,7 @@ private data class NativePhotoViewerTarget(
     val w0Type: String,
     val routeConstructor: NativeMethodCall,
     val routeClass: String,
+    val routeParameterCount: Int,
     val viewerFlags: Int,
     val navigationCall: NativeMethodCall,
 )
@@ -1121,14 +1115,17 @@ private fun resolveNativePhotoViewerTarget(
                     .filter { method ->
                         if (method.name != "<init>") return@filter false
                         val parameters = method.parameterTypes.map(CharSequence::toString)
-                        parameters.size == 7 &&
+                        // Semantic prefix + trailing default-mask int; auxiliary primitive
+                        // parameters (e.g. the Boolean added in 12.41) are adapted, not matched.
+                        parameters.size >= 7 &&
                             parameters[0] == JAVA_LIST &&
                             parameters[1] == INT_DESCRIPTOR &&
                             parameters[2] == ebClass &&
                             parameters[3] == STRING &&
                             parameters[4] == STRING &&
                             parameters[5] == STRING &&
-                            parameters[6] == INT_DESCRIPTOR
+                            parameters.last() == INT_DESCRIPTOR &&
+                            parameters.subList(6, parameters.size - 1).all { it in INT_LIKE_PRIMITIVES }
                     }
                     .forEach { constructor ->
                         add(routeClass to constructor)
@@ -1141,7 +1138,8 @@ private fun resolveNativePhotoViewerTarget(
     )
     val routeClass = viewerRoute.first
     val routeConstructor = viewerRoute.second.toNativeCall()
-    val viewerFlags = resolveViewerFlags(hostMethod, routeConstructor.descriptor)
+    val routeParameterCount = viewerRoute.second.parameterTypes.size
+    val viewerFlags = resolveViewerFlags(hostMethod, routeConstructor.descriptor, routeParameterCount)
 
     val postClass = context.mutableClassDefBy(postType)
     val postAccessors =
@@ -1210,6 +1208,7 @@ private fun resolveNativePhotoViewerTarget(
         w0Type = w0Type,
         routeConstructor = routeConstructor,
         routeClass = routeClass,
+        routeParameterCount = routeParameterCount,
         viewerFlags = viewerFlags,
         navigationCall = navigationCall,
     )
@@ -1219,13 +1218,17 @@ private fun resolveNativePhotoViewerTarget(
 // argument at its media-branch call site. The mask selects which constructor
 // params fall back to defaults, so it is read from the call site, never
 // hardcoded: R8 keeps values but source changes could move them.
-private fun resolveViewerFlags(hostMethod: Method, constructorDescriptor: String): Int {
+private fun resolveViewerFlags(
+    hostMethod: Method,
+    constructorDescriptor: String,
+    parameterCount: Int,
+): Int {
     val instructions = hostMethod.implementation?.instructions?.toList()
         ?: throw PatchException("NewX post media event handler has no implementation: $hostMethod")
     val flags = instructions.mapIndexedNotNull { index, instruction ->
         if (instruction.opcode != Opcode.INVOKE_DIRECT_RANGE) return@mapIndexedNotNull null
         val range = instruction as? Instruction3rc ?: return@mapIndexedNotNull null
-        if (range.registerCount != 8) return@mapIndexedNotNull null
+        if (range.registerCount != parameterCount + 1) return@mapIndexedNotNull null
         val reference = instruction.getReference<MethodReference>() ?: return@mapIndexedNotNull null
         if (reference.name != "<init>") return@mapIndexedNotNull null
         val descriptor = methodDescriptor(
@@ -1235,7 +1238,14 @@ private fun resolveViewerFlags(hostMethod: Method, constructorDescriptor: String
             returnType = reference.returnType,
         )
         if (descriptor != constructorDescriptor) return@mapIndexedNotNull null
-        nearbyFlagsConstant(instructions, index, range.startRegister + 7)
+        // Only call sites whose auxiliary primitive arguments are constant 0 reproduce what the
+        // emitter passes (it defaults them to 0); a site forwarding a runtime value is a
+        // different configuration whose flags must not be borrowed.
+        val auxiliaryAreZero = (6 until parameterCount - 1).all { parameter ->
+            nearbyFlagsConstant(instructions, index, range.startRegister + 1 + parameter) == 0
+        }
+        if (!auxiliaryAreZero) return@mapIndexedNotNull null
+        nearbyFlagsConstant(instructions, index, range.startRegister + parameterCount)
     }.distinct()
     return requireExactlyOne(
         "NewX viewer destination flags",
@@ -1243,10 +1253,8 @@ private fun resolveViewerFlags(hostMethod: Method, constructorDescriptor: String
     )
 }
 
-// Reads a flags int constant feeding a call-site argument register. Looks back
-// over instructions provably free of register writes (consts to other registers,
-// invokes, branches, returns, field stores); any other shape aborts the site so a
-// stale value can never be picked up. Uses the const format interfaces directly
+// Reads a flags int constant without crossing a write to either tracked register slot.
+// Uses the const format interfaces directly
 // because the shared OneRegisterInstruction cast does not resolve against
 // dexlib2 instruction objects in this runtime.
 private fun nearbyFlagsConstant(
@@ -1260,18 +1268,8 @@ private fun nearbyFlagsConstant(
         if (constDestination(prior) == flagsRegister) {
             return (prior as? NarrowLiteralInstruction)?.narrowLiteral
         }
-        val name = prior.opcode.name
-        val sideEffectFree = name.startsWith("CONST") ||
-            name.startsWith("INVOKE") ||
-            name.startsWith("IF_") ||
-            name.startsWith("GOTO") ||
-            name.startsWith("RETURN") ||
-            name == "NOP" ||
-            name.startsWith("MONITOR") ||
-            name.startsWith("IPUT") ||
-            name.startsWith("SPUT") ||
-            name == "THROW"
-        if (!sideEffectFree) return null
+        // Result-producing invokes do not write a DEX register until move-result.
+        if (prior.opcode.format.isPayloadFormat || writesRegister(prior, flagsRegister)) return null
     }
     return null
 }
@@ -1378,8 +1376,13 @@ private fun Block.itemClickViewerInstructions(
     constInt(4, 0)
     constInt(5, 0)
     constInt(6, 0)
-    constInt(7, event.viewerFlags)
-    invokeDirect(methodReference(event.routeConstructor.descriptor), 0, 1, 2, 3, 4, 5, 6, 7)
+    // Auxiliary primitive constructor parameters (between the strings and the mask) default to 0.
+    for (extra in 7 until event.routeParameterCount) constInt(extra, 0)
+    constInt(event.routeParameterCount, event.viewerFlags)
+    invokeDirect(
+        methodReference(event.routeConstructor.descriptor),
+        *(0..event.routeParameterCount).toList().toIntArray(),
+    )
     move(5, 0, OBJECT)
     move(7, receiverRegister, OBJECT)
     iget(6, 7, fieldReference(target.navigationField))
@@ -1579,7 +1582,7 @@ private fun patchItemClickPhotoViewer(timelineListDescriptor: String) {
                     method.parameterTypes.map(CharSequence::toString) == target.parameterTypes
             },
         )
-        val expanded = method.cloneMutable(additionalRegisters = 8)
+        val expanded = method.cloneMutable(additionalRegisters = maxOf(8, event.routeParameterCount + 1))
         owner.methods.remove(method)
         owner.methods.add(expanded)
         // The block is a one-time entry decision that returns to the caller only by falling into
