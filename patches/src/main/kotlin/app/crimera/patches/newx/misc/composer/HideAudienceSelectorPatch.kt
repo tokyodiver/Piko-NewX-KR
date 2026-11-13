@@ -35,8 +35,8 @@ private fun Method.calls(reference: MethodReference): Boolean =
         it.getReference<MethodReference>()?.toString() == reference.toString()
     } == true
 
+// R8 may move the label helper outside the composer package.
 private object AudienceLabel : Fingerprint(
-    definingClass = "Lcom/x/composer/narrowcast/",
     returnType = "Ljava/lang/String;",
     filters = listOf(literal({ resourceId(ResourceType.STRING, "narrowcast_default_audience") })),
     custom = { method, _ ->
