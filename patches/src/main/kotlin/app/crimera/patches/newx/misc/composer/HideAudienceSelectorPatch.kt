@@ -51,13 +51,16 @@ val hideAudienceSelectorPatch = bytecodePatch(
     description = "Adds a default-on option to hide the audience selector beside the composer avatar.",
 ) {
     unsupportedOnMount()
-    // First validated against the supplied production APKM; do not claim untested older ABIs.
+    // Declare the production targets independently verified for this renderer.
     compatibleWith(Compatibility(
         name = "NewX",
         packageName = "com.twitter.android",
         apkFileType = ApkFileType.APKM,
         appIconColor = 0x000000,
-        targets = listOf(AppTarget(version = "12.37.2-prod.01")),
+        targets = listOf(
+            AppTarget(version = "12.37.2-prod.01"),
+            AppTarget(version = "12.41.0-prod.01"),
+        ),
     ))
 
     val hide = newXSettings {
